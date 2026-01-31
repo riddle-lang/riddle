@@ -2,6 +2,7 @@ use crate::frontend::ast::AstNode::Identifier;
 use crate::frontend::ast::{AstNode, Literal};
 use crate::hir::builder::HirBuilder;
 use crate::hir::expr::{HirExpr, HirExprKind, HirLiteral};
+use crate::hir::id::TyExprId;
 use crate::hir::items::HirFuncParam;
 use crate::hir::module::HirModule;
 use crate::hir::type_expr::{HirTypeExpr, HirTypeExprKind};
@@ -31,14 +32,7 @@ impl<'a> AstLower<'a> {
                 } => {
                     if self.deep == 0 {
                         // global variable
-                        let ty = match type_expr {
-                            Some(ty) => {
-                                let ty = self.lower_type_expr(ty)?;
-                                let ty = self.builder.create_type_expr(ty);
-                                Some(ty)
-                            }
-                            None => None,
-                        };
+                        let ty = self.lower_optional_type_expr(type_expr)?;
                         let value_node = value
                             .as_deref()
                             .ok_or_else(|| "Global variable initializer required".to_string())?;
@@ -47,13 +41,26 @@ impl<'a> AstLower<'a> {
                         self.builder
                             .create_global_var(name, ty, value)
                             .map_err(|_| "Failed to create global variable".to_string())?;
+                    } else {
+                        // local variable
+                        let ty = self.lower_optional_type_expr(type_expr)?;
+                        let value = match value {
+                            Some(v) => {
+                                let v = self.lower_expr(v)?;
+                                Some(self.builder.create_expr(v))
+                            }
+                            None => None,
+                        };
+                        self.builder
+                            .local(name, ty, value)
+                            .map_err(|_| "Failed to create local variable".to_string())?;
                     }
                 }
                 AstNode::FuncDecl {
-                    name: _,
+                    name,
                     params,
                     return_type,
-                    body: _,
+                    body,
                 } => {
                     let mut p = Vec::new();
                     for param in params {
@@ -70,9 +77,29 @@ impl<'a> AstLower<'a> {
                             kind: HirTypeExprKind::Unit,
                         },
                     };
+                    let ret = self.builder.create_type_expr(ret);
 
+                    let func_id = self
+                        .builder
+                        .create_func(name, ret, p)
+                        .map_err(|_| "Failed to create function".to_string())?;
+
+                    self.builder.set_func(func_id);
+                    self.deep += 1;
+                    self.lower_block(body)?;
+                    self.deep -= 1;
                 }
-                _ => {}
+                AstNode::Block { .. } => {
+                    self.lower_block(stmt)?;
+                }
+                _ => {
+                    // expr stmt
+                    let expr = self.lower_expr(stmt)?;
+                    let expr_id = self.builder.create_expr(expr);
+                    self.builder
+                        .expr_stmt(expr_id, true)
+                        .map_err(|_| "Failed to create expr stmt".to_string())?;
+                }
             }
         }
         Ok(())
@@ -86,6 +113,82 @@ impl<'a> AstLower<'a> {
             _ => todo!(),
         };
         Ok(ty)
+    }
+
+    fn lower_optional_type_expr(
+        &mut self,
+        type_expr: &Option<Box<AstNode>>,
+    ) -> Result<Option<TyExprId>, String> {
+        match type_expr {
+            Some(ty) => {
+                let ty = self.lower_type_expr(ty)?;
+                let ty = self.builder.create_type_expr(ty);
+                Ok(Some(ty))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn lower_block(&mut self, block: &AstNode) -> Result<(), String> {
+        match block {
+            AstNode::Block {
+                statements,
+                final_expr,
+            } => {
+                for stmt in statements {
+                    self.lower_stmt(stmt)?;
+                }
+                if let Some(expr) = final_expr {
+                    let expr = self.lower_expr(expr)?;
+                    let expr_id = self.builder.create_expr(expr);
+                    self.builder
+                        .expr_stmt(expr_id, false)
+                        .map_err(|_| "Failed to create expr stmt".to_string())?;
+                }
+                Ok(())
+            }
+            _ => Err("Expected block".to_string()),
+        }
+    }
+
+    fn lower_stmt(&mut self, stmt: &AstNode) -> Result<(), String> {
+        match stmt {
+            AstNode::VarDecl {
+                name,
+                type_expr,
+                value,
+            } => {
+                let ty = match type_expr {
+                    Some(ty) => {
+                        let ty = self.lower_type_expr(ty)?;
+                        let ty = self.builder.create_type_expr(ty);
+                        Some(ty)
+                    }
+                    None => None,
+                };
+                let value = match value {
+                    Some(v) => {
+                        let v = self.lower_expr(v)?;
+                        Some(self.builder.create_expr(v))
+                    }
+                    None => None,
+                };
+                self.builder
+                    .local(name, ty, value)
+                    .map_err(|_| "Failed to create local variable".to_string())?;
+            }
+            AstNode::Block { .. } => {
+                self.lower_block(stmt)?;
+            }
+            _ => {
+                let expr = self.lower_expr(stmt)?;
+                let expr_id = self.builder.create_expr(expr);
+                self.builder
+                    .expr_stmt(expr_id, true)
+                    .map_err(|_| "Failed to create expr stmt".to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn lower_expr(&self, expr: &AstNode) -> Result<HirExpr, String> {
