@@ -10,7 +10,7 @@ pub struct DefId(pub usize);
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TyId(pub usize);
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct TypeExprId(pub usize);
+pub struct TyExprId(pub usize);
 // for local variable
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct LocalId(pub usize);

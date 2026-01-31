@@ -6,3 +6,4 @@ mod expr;
 mod stmt;
 pub mod builder;
 pub mod type_expr;
+pub mod lowering;

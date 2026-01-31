@@ -1,4 +1,4 @@
-use crate::hir::id::{ExprId, LocalId, TypeExprId};
+use crate::hir::id::{ExprId, LocalId, TyExprId};
 
 #[derive(Debug)]
 pub struct HirStmt {
@@ -21,7 +21,7 @@ pub enum HirStmtKind {
     // variable define and init
     Let {
         name: String,
-        ty_annot: Option<TypeExprId>,
+        ty_annot: Option<TyExprId>,
         init: Option<ExprId>,
         id: LocalId,
     },

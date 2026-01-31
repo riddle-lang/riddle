@@ -1,6 +1,6 @@
 use crate::hir::expr::HirExpr;
-use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId, TypeExprId};
-use crate::hir::items::{HirEnum, HirFunc, HirItem};
+use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId, TyExprId};
+use crate::hir::items::{HirEnum, HirFunc, HirGlobalVariable, HirItem};
 use crate::hir::module::HirModule;
 use crate::hir::stmt::{HirStmt, HirStmtKind};
 use crate::hir::types::HirType;
@@ -32,8 +32,8 @@ impl<'a> HirBuilder<'a> {
         id
     }
 
-    pub fn create_type_expr(&mut self, ty_expr: HirTypeExpr) -> TypeExprId {
-        let id = TypeExprId(self.module.type_exprs.len());
+    pub fn create_type_expr(&mut self, ty_expr: HirTypeExpr) -> TyExprId {
+        let id = TyExprId(self.module.type_exprs.len());
         self.module.type_exprs.push(ty_expr);
         id
     }
@@ -50,7 +50,7 @@ impl<'a> HirBuilder<'a> {
         id
     }
 
-    pub fn create_func(&mut self, name: &str, ty: TyId) -> Result<DefId, HirBuilderError> {
+    pub fn create_func(&mut self, name: &str, ty: TyExprId) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let func = HirFunc {
             name: name.to_string(),
@@ -59,6 +59,17 @@ impl<'a> HirBuilder<'a> {
             body: Vec::new(),
         };
         self.module.items.push(HirItem::Func(func));
+        Ok(id)
+    }
+
+    pub fn create_global_var(&mut self, name: &str, ty: Option<TyExprId>, value: ExprId) -> Result<DefId, HirBuilderError> {
+        let id = DefId(self.module.items.len());
+        let gv = HirGlobalVariable {
+            name: name.to_string(),
+            ty,
+            value,
+        };
+        self.module.items.push(HirItem::GlobalVariable(gv));
         Ok(id)
     }
 
@@ -85,7 +96,7 @@ impl<'a> HirBuilder<'a> {
     pub fn local(
         &mut self,
         name: &str,
-        ty_annot: Option<TypeExprId>,
+        ty_annot: Option<TyExprId>,
         init: Option<ExprId>,
     ) -> Result<(), HirBuilderError> {
         let func_id = self.active_func

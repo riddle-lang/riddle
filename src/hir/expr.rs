@@ -7,14 +7,15 @@ pub struct HirExpr {
 
 #[derive(Debug)]
 pub enum HirExprKind {
-    Literal(Literal),
+    Literal(HirLiteral),
     Block{
         stmts: Vec<StmtId>,
     }
 }
 
 #[derive(Debug)]
-pub enum Literal {
+pub enum HirLiteral {
     Int(i64),
+    Bool(bool),
     Str(String),
 }

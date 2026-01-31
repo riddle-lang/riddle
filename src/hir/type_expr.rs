@@ -1,4 +1,4 @@
-use crate::hir::id::TypeExprId;
+use crate::hir::id::TyExprId;
 
 #[derive(Debug, Clone)]
 pub struct HirTypeExpr {
@@ -9,5 +9,5 @@ pub struct HirTypeExpr {
 pub enum HirTypeExprKind {
     /// named type like `int`
     Path(String), 
-    Func(Vec<TypeExprId>, TypeExprId),
+    Func(Vec<TyExprId>, TyExprId),
 }

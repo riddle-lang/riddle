@@ -123,7 +123,7 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
             AstNode::Block { statements, final_expr }
         }
         Rule::expr_stmt => {
-            AstNode::ExprStmt(Box::new(parse_pair(pair.into_inner().next().unwrap())))
+            parse_pair(pair.into_inner().next().unwrap())
         }
         Rule::binary_expr => {
             let mut inner = pair.into_inner();
@@ -141,17 +141,22 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
         }
         Rule::postfix_expr => {
             let mut inner = pair.into_inner();
-            let base = Box::new(parse_pair(inner.next().unwrap()));
-            let suffixes = inner.map(parse_pair).collect::<Vec<_>>();
-            if suffixes.is_empty() {
-                *base
-            } else {
-                AstNode::PostfixExpr { base, suffixes }
+            let mut expr = parse_pair(inner.next().unwrap());
+
+            for p in inner {
+                match p.as_rule() {
+                    Rule::call_suffix => {
+                        debug_assert!(p.as_rule() == Rule::call_suffix);
+                        let args = p.into_inner().map(parse_pair).collect();
+                        expr = AstNode::Call {
+                            func: Box::new(expr),
+                            args,
+                        };
+                    }
+                    _ => unreachable!(),
+                }
             }
-        }
-        Rule::call_suffix => {
-            let args = pair.into_inner().map(parse_pair).collect();
-            AstNode::CallSuffix(args)
+            expr
         }
         Rule::identifier => AstNode::Identifier(pair.as_str().to_string()),
         Rule::bool => AstNode::Literal(Literal::Bool(pair.as_str().parse().unwrap())),

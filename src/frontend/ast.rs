@@ -22,7 +22,6 @@ pub enum AstNode {
         name: String,
         variants: Vec<EnumVariant>,
     },
-    ExprStmt(Box<AstNode>),
     Block {
         statements: Vec<AstNode>,
         final_expr: Option<Box<AstNode>>,
@@ -34,11 +33,10 @@ pub enum AstNode {
         op: String,
         rhs: Box<AstNode>,
     },
-    PostfixExpr {
-        base: Box<AstNode>,
-        suffixes: Vec<AstNode>, // CallSuffix
+    Call {
+        func: Box<AstNode>,
+        args: Vec<AstNode>,
     },
-    CallSuffix(Vec<AstNode>), // Arguments
     
     // Primary Expressions
     Identifier(String),
