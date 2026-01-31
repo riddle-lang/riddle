@@ -1,0 +1,66 @@
+WHITESPACE = _{ (" " | "\t" | "\r" | "\n" | COMMENT)+ }
+COMMENT    = _{ LINE_COMMENT | BLOCK_COMMENT }
+LINE_COMMENT  = _{ "//" ~ (!"\n" ~ ANY)* }
+BLOCK_COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+program   = { SOI ~ statement* ~ EOI }
+
+statement = _{
+      block
+    | var_decl
+    | func_decl
+    | struct_decl
+    | enum_decl
+    | expr_stmt
+}
+
+var_decl  = { "var" ~ identifier ~ (":" ~ type_expr)? ~ ("=" ~ value_expr)? ~ ";" }
+type_expr = { expr }
+value_expr = { expr }
+
+func_param = { identifier ~ ":" ~ type_expr }
+
+func_decl = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ (":" ~ type_expr)? ~ block }
+
+struct_decl   = { "struct" ~ identifier ~ "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
+struct_field  = { identifier ~ ":" ~ type_expr }
+
+enum_decl     = { "enum" ~ identifier ~ "{" ~ (enum_variant ~ ("," ~ enum_variant)*)? ~ ","? ~ "}" }
+enum_variant  = { identifier ~ (enum_tuple | enum_struct)? }
+enum_tuple    = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+enum_struct   = { "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
+
+block     = { "{" ~ statement* ~ expr? ~ "}" }
+
+expr_stmt = { expr ~ ";" }
+
+expr = _{ binary_expr }
+
+binary_expr  = { postfix_expr ~ (op ~ postfix_expr)* }
+
+postfix_expr = { primary_expr ~ call_suffix* }
+
+call_suffix = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+
+primary_expr = _{
+      block
+    | literal
+    | identifier
+    | "(" ~ expr ~ ")"
+}
+
+literal = _{ float | number | string | bool }
+
+bool   = { "true" | "false" }
+
+float  = { number ~ "." ~ number }
+
+number = { "0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* }
+
+string = { "\"" ~ (escape | (!"\"" ~ ANY))* ~ "\"" }
+escape = { "\\" ~ ( "\"" | "\\" | "n" | "r" | "t" | "0" ) }
+
+identifier = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+
+op = @{ op_char+ }
+op_char = { "+" | "-" | "*" | "/" | "!" | "@" | "%" | "^" | "&" | "=" | "~" | "<" | ">" }

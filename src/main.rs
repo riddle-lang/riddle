@@ -7,8 +7,15 @@ use hir::type_expr::HirTypeExpr;
 use hir::types::HirType;
 
 mod hir;
+mod frontend;
 
 fn main() {
+    let code = r#"fun main() { x = 10; 10 }"#;
+
+    let ast = frontend::parser::parse(code).unwrap();
+
+    println!("{:#?}", ast);
+
     let mut module = HirModule::new();
 
     let mut builder = HirBuilder::new(&mut module);

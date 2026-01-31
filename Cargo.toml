@@ -1,9 +1,9 @@
 [package]
-name = "Riddle4Rs"
+name = "riddle"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
-pest = "2.8.3"
-pest_derive = "2.8.3"
-enum_dispatch = "0.3"
+pest = "2.8.5"
+pest_derive = "2.8.5"
