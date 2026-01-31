@@ -8,6 +8,7 @@ pub struct HirTypeExpr {
 #[derive(Debug, Clone)]
 pub enum HirTypeExprKind {
     /// named type like `int`
+    Unit,
     Path(String), 
     Func(Vec<TyExprId>, TyExprId),
 }

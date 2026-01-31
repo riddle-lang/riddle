@@ -10,9 +10,16 @@ pub enum HirItem {
 }
 
 #[derive(Debug)]
+pub struct HirFuncParam {
+    pub name: String,
+    pub type_expr: TyExprId,
+}
+
+#[derive(Debug)]
 pub struct HirFunc {
     pub name: String,
-    pub ty: TyExprId,
+    pub param: Vec<HirFuncParam>,
+    pub ret: TyExprId,
     pub id: DefId,
     pub body: Vec<StmtId>,
 }
