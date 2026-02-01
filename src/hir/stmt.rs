@@ -1,6 +1,6 @@
 use crate::hir::id::{ExprId, LocalId, TyExprId};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirStmt {
     pub kind: HirStmtKind,
 }
@@ -12,7 +12,7 @@ impl HirStmt {
 }
 
 /// Here saving the return value is a meaningless operation like ` return ` or ` break `
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HirStmtKind {
     Expr {
         expr: ExprId,

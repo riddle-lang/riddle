@@ -44,6 +44,12 @@ impl<'a> HirBuilder<'a> {
         id
     }
 
+    pub fn next_local_id(&mut self) -> LocalId {
+        let id = LocalId(self.module.next_local_id);
+        self.module.next_local_id += 1;
+        id
+    }
+
     pub fn create_expr(&mut self, expr: HirExpr) -> ExprId {
         let id = ExprId(self.module.exprs.len());
         self.module.exprs.push(expr);
@@ -108,7 +114,7 @@ impl<'a> HirBuilder<'a> {
     ) -> Result<(), HirBuilderError> {
         let func_id = self.active_func
             .ok_or(HirBuilderError::CurrentFunctionNotSet)?;
-        let id = LocalId(self.module.stmts.len());
+        let id = self.next_local_id();
         let stmt_id = self.create_stmt(HirStmt::new(HirStmtKind::Let {
             name: name.into(),
             ty_annot,

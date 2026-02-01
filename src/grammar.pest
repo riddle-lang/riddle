@@ -11,6 +11,7 @@ statement = _{
     | func_decl
     | struct_decl
     | enum_decl
+    | return_stmt
     | expr_stmt
 }
 
@@ -20,7 +21,7 @@ value_expr = { expr }
 
 func_param = { identifier ~ ":" ~ type_expr }
 
-func_decl = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ (":" ~ type_expr)? ~ block }
+func_decl = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ block }
 
 struct_decl   = { "struct" ~ identifier ~ "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
 struct_field  = { identifier ~ ":" ~ type_expr }
@@ -29,6 +30,8 @@ enum_decl     = { "enum" ~ identifier ~ "{" ~ (enum_variant ~ ("," ~ enum_varian
 enum_variant  = { identifier ~ (enum_tuple | enum_struct)? }
 enum_tuple    = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 enum_struct   = { "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
+
+return_stmt = {"return" ~ expr ~ ";"}
 
 block     = { "{" ~ statement* ~ expr? ~ "}" }
 

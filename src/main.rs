@@ -2,6 +2,7 @@ extern crate core;
 
 use crate::frontend::ast::AstNode::Program;
 use crate::hir::lowering::AstLower;
+use crate::hir::name_pass::NamePass;
 use hir::module::HirModule;
 
 mod hir;
@@ -9,8 +10,9 @@ mod frontend;
 
 fn main() {
     let code = r#"
-        fun main() { x = 10; x(1) }
-        var a = 1;
+        fun add(x: int, y: int) -> int {
+            return x + y;
+        }
     "#;
 
     let ast = frontend::parser::parse(code).unwrap();
@@ -25,6 +27,9 @@ fn main() {
     });
 
     lower.lower().unwrap();
+    
+    let mut name_pass = NamePass::new(&mut module);
+    name_pass.run();
     
     println!("{:#?}", module);
 }

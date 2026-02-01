@@ -22,6 +22,7 @@ pub enum AstNode {
         name: String,
         variants: Vec<EnumVariant>,
     },
+    Return(Box<AstNode>),
     Block {
         statements: Vec<AstNode>,
         final_expr: Option<Box<AstNode>>,

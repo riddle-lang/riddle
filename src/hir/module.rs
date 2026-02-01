@@ -11,6 +11,7 @@ pub struct HirModule {
     pub stmts: Vec<HirStmt>,
     pub types: Vec<HirType>,
     pub type_exprs: Vec<HirTypeExpr>,
+    pub next_local_id: usize,
 }
 
 impl HirModule {
@@ -21,6 +22,7 @@ impl HirModule {
             stmts: vec![],
             types: vec![],
             type_exprs: vec![],
+            next_local_id: 0,
         }
     }
 }

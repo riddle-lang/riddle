@@ -1,21 +1,20 @@
-use pest::pratt_parser::Op;
-use crate::hir::id::{DefId, ExprId, StmtId, TyId, TyExprId};
-use crate::hir::type_expr::HirTypeExpr;
+use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyExprId};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HirItem {
     Func(HirFunc),
     Enum(HirEnum),
     GlobalVariable(HirGlobalVariable),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirFuncParam {
     pub name: String,
     pub type_expr: TyExprId,
+    pub id: LocalId,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirFunc {
     pub name: String,
     pub param: Vec<HirFuncParam>,
@@ -24,14 +23,14 @@ pub struct HirFunc {
     pub body: Vec<StmtId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirEnum {
     pub name: String,
     pub id: DefId,
     // TODO: variants
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirGlobalVariable {
     pub name: String,
     pub ty: Option<TyExprId>,

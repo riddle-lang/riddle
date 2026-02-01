@@ -1,19 +1,32 @@
-use crate::hir::id::StmtId;
+use crate::hir::id::{ExprId, LocalId, StmtId};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HirExpr {
     pub kind: HirExprKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HirExprKind {
     Literal(HirLiteral),
-    Block{
+    BinaryOp {
+        lhs: ExprId,
+        op: String,
+        rhs: ExprId,
+    },
+    Symbol {
+        name: String,
+        id: Option<LocalId>,
+    },
+    Call {
+        callee: ExprId,
+        args: Vec<ExprId>,
+    },
+    Block {
         stmts: Vec<StmtId>,
-    }
+    },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HirLiteral {
     Int(i64),
     Bool(bool),

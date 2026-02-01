@@ -1,4 +1,3 @@
-use crate::frontend::ast::AstNode::Identifier;
 use crate::frontend::ast::{AstNode, Literal};
 use crate::hir::builder::HirBuilder;
 use crate::hir::expr::{HirExpr, HirExprKind, HirLiteral};
@@ -66,9 +65,11 @@ impl<'a> AstLower<'a> {
                     for param in params {
                         let type_expr = self.lower_type_expr(&param.type_expr)?;
                         let type_expr = self.builder.create_type_expr(type_expr);
+                        let id = self.builder.next_local_id();
                         p.push(HirFuncParam {
                             name: param.name.clone(),
                             type_expr,
+                            id,
                         })
                     }
                     let ret = match return_type {
@@ -89,16 +90,8 @@ impl<'a> AstLower<'a> {
                     self.lower_block(body)?;
                     self.deep -= 1;
                 }
-                AstNode::Block { .. } => {
-                    self.lower_block(stmt)?;
-                }
                 _ => {
-                    // expr stmt
-                    let expr = self.lower_expr(stmt)?;
-                    let expr_id = self.builder.create_expr(expr);
-                    self.builder
-                        .expr_stmt(expr_id, true)
-                        .map_err(|_| "Failed to create expr stmt".to_string())?;
+                    return Err("Expected statement".to_string());
                 }
             }
         }
@@ -107,7 +100,7 @@ impl<'a> AstLower<'a> {
 
     fn lower_type_expr(&mut self, type_expr: &Box<AstNode>) -> Result<HirTypeExpr, String> {
         let ty = match type_expr.as_ref() {
-            Identifier(name) => HirTypeExpr {
+            AstNode::Identifier(name) => HirTypeExpr {
                 kind: HirTypeExprKind::Path(name.clone()),
             },
             _ => todo!(),
@@ -177,6 +170,13 @@ impl<'a> AstLower<'a> {
                     .local(name, ty, value)
                     .map_err(|_| "Failed to create local variable".to_string())?;
             }
+            AstNode::Return(val) => {
+                let expr = self.lower_expr(val)?;
+                let expr_id = self.builder.create_expr(expr);
+                self.builder
+                    .ret(expr_id)
+                    .map_err(|_| "Failed to create return stmt".to_string())?;
+            }
             AstNode::Block { .. } => {
                 self.lower_block(stmt)?;
             }
@@ -191,7 +191,7 @@ impl<'a> AstLower<'a> {
         Ok(())
     }
 
-    fn lower_expr(&self, expr: &AstNode) -> Result<HirExpr, String> {
+    fn lower_expr(&mut self, expr: &AstNode) -> Result<HirExpr, String> {
         match expr {
             AstNode::Literal(lit) => match lit {
                 Literal::Int(val) => Ok(HirExpr {
@@ -202,6 +202,41 @@ impl<'a> AstLower<'a> {
                 }),
                 _ => todo!(),
             },
+            AstNode::BinaryExpr { lhs, op, rhs } => {
+                let lhs = self.lower_expr(lhs)?;
+                let lhs = self.builder.create_expr(lhs);
+                let rhs = self.lower_expr(rhs)?;
+                let rhs = self.builder.create_expr(rhs);
+                Ok(HirExpr {
+                    kind: HirExprKind::BinaryOp {
+                        lhs,
+                        op: op.clone(),
+                        rhs,
+                    },
+                })
+            }
+            AstNode::Identifier(name) => Ok(HirExpr {
+                kind: HirExprKind::Symbol {
+                    name: name.clone(),
+                    id: None,
+                },
+            }),
+            AstNode::Call { func, args } => {
+                let callee = self.lower_expr(func)?;
+                let callee = self.builder.create_expr(callee);
+                let mut arg_ids = Vec::new();
+                for arg in args {
+                    let arg_expr = self.lower_expr(arg)?;
+                    let arg_id = self.builder.create_expr(arg_expr);
+                    arg_ids.push(arg_id);
+                }
+                Ok(HirExpr {
+                    kind: HirExprKind::Call {
+                        callee,
+                        args: arg_ids,
+                    },
+                })
+            }
             _ => todo!(),
         }
     }

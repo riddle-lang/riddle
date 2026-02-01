@@ -122,6 +122,9 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
             }
             AstNode::Block { statements, final_expr }
         }
+        Rule::return_stmt => {
+            AstNode::Return(Box::new(parse_pair(pair.into_inner().next().unwrap())))
+        }
         Rule::expr_stmt => {
             parse_pair(pair.into_inner().next().unwrap())
         }
