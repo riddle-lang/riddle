@@ -8,17 +8,18 @@ use crate::hir::pass::name_pass::NamePass;
 
 mod hir;
 mod frontend;
+mod codegen;
+
+use crate::codegen::Codegen;
 
 fn main() {
     let code = r#"
-        fun add(x: int, y: int) -> int {
-            return x + y;
+        fun test(x: int, y: int) -> int {
+            return (x * y) - (x / y);
         }
         
-        fun main() {
-            var a = 1;
-            var b = 2;
-            var c = add(a, b);
+        fun main() -> int {
+            return test(10, 2);
         }
     "#;
 
@@ -39,5 +40,13 @@ fn main() {
     let mut type_infer = TypeInfer::new(&mut module);
     type_infer.infer().unwrap();
     
-    println!("{:#?}", module);
+    // println!("{:#?}", module);
+
+    let mut codegen = Codegen::new();
+    codegen.compile(&module);
+
+    let main_ptr = codegen.get_fn_ptr("main");
+    let main_fn: fn() -> i64 = unsafe { std::mem::transmute(main_ptr) };
+    let result = main_fn();
+    println!("Result: {}", result);
 }
