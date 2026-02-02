@@ -74,9 +74,7 @@ impl<'a> AstLower<'a> {
                     }
                     let ret = match return_type {
                         Some(ret_type) => self.lower_type_expr(ret_type)?,
-                        None => HirTypeExpr {
-                            kind: HirTypeExprKind::Unit,
-                        },
+                        None => HirTypeExpr::new(HirTypeExprKind::Unit),
                     };
                     let ret = self.builder.create_type_expr(ret);
 
@@ -100,9 +98,7 @@ impl<'a> AstLower<'a> {
 
     fn lower_type_expr(&mut self, type_expr: &Box<AstNode>) -> Result<HirTypeExpr, String> {
         let ty = match type_expr.as_ref() {
-            AstNode::Identifier(name) => HirTypeExpr {
-                kind: HirTypeExprKind::Path(name.clone()),
-            },
+            AstNode::Identifier(name) => HirTypeExpr::new(HirTypeExprKind::Path(name.clone())),
             _ => todo!(),
         };
         Ok(ty)
@@ -194,33 +190,26 @@ impl<'a> AstLower<'a> {
     fn lower_expr(&mut self, expr: &AstNode) -> Result<HirExpr, String> {
         match expr {
             AstNode::Literal(lit) => match lit {
-                Literal::Int(val) => Ok(HirExpr {
-                    kind: HirExprKind::Literal(HirLiteral::Int(*val)),
-                }),
-                Literal::Bool(val) => Ok(HirExpr {
-                    kind: HirExprKind::Literal(HirLiteral::Bool(*val)),
-                }),
-                _ => todo!(),
+                Literal::Int(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Int(*val)))),
+                Literal::Bool(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Bool(*val)))),
+                Literal::Float(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Float(*val)))),
+                Literal::Str(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Str(val.clone())))),
             },
             AstNode::BinaryExpr { lhs, op, rhs } => {
                 let lhs = self.lower_expr(lhs)?;
                 let lhs = self.builder.create_expr(lhs);
                 let rhs = self.lower_expr(rhs)?;
                 let rhs = self.builder.create_expr(rhs);
-                Ok(HirExpr {
-                    kind: HirExprKind::BinaryOp {
-                        lhs,
-                        op: op.clone(),
-                        rhs,
-                    },
-                })
+                Ok(HirExpr::new(HirExprKind::BinaryOp {
+                    lhs,
+                    op: op.clone(),
+                    rhs,
+                }))
             }
-            AstNode::Identifier(name) => Ok(HirExpr {
-                kind: HirExprKind::Symbol {
-                    name: name.clone(),
-                    id: None,
-                },
-            }),
+            AstNode::Identifier(name) => Ok(HirExpr::new(HirExprKind::Symbol {
+                name: name.clone(),
+                id: None,
+            })),
             AstNode::Call { func, args } => {
                 let callee = self.lower_expr(func)?;
                 let callee = self.builder.create_expr(callee);
@@ -230,12 +219,10 @@ impl<'a> AstLower<'a> {
                     let arg_id = self.builder.create_expr(arg_expr);
                     arg_ids.push(arg_id);
                 }
-                Ok(HirExpr {
-                    kind: HirExprKind::Call {
-                        callee,
-                        args: arg_ids,
-                    },
-                })
+                Ok(HirExpr::new(HirExprKind::Call {
+                    callee,
+                    args: arg_ids,
+                }))
             }
             _ => todo!(),
         }

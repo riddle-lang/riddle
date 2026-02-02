@@ -1,8 +1,15 @@
-use crate::hir::id::{ExprId, LocalId, StmtId};
+use crate::hir::id::{ExprId, LocalId, StmtId, TyId};
 
 #[derive(Debug, Clone)]
 pub struct HirExpr {
     pub kind: HirExprKind,
+    pub ty: Option<TyId>,
+}
+
+impl HirExpr {
+    pub fn new(kind: HirExprKind) -> Self {
+        Self { kind, ty: None }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +36,7 @@ pub enum HirExprKind {
 #[derive(Debug, Clone)]
 pub enum HirLiteral {
     Int(i64),
+    Float(f64),
     Bool(bool),
     Str(String),
 }

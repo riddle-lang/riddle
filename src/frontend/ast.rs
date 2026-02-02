@@ -67,6 +67,6 @@ pub enum EnumVariant {
 pub enum Literal {
     Int(i64),
     Float(f64),
-    Str(String),
     Bool(bool),
+    Str(String),
 }
