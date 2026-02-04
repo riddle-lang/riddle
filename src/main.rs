@@ -14,11 +14,18 @@ use crate::codegen::Codegen;
 
 fn main() {
     let code = r#"
+        struct Foo{
+            x: int
+        }
+
+        extern "C" fun test1(x: int, y: int) -> int;
+
         fun test(x: int, y: int) -> int {
             return (x * y) - (x / y);
         }
         
         fun main() -> int {
+            let x: Foo = Foo { x: 1 };
             return test(10, 2);
         }
     "#;
@@ -44,9 +51,4 @@ fn main() {
 
     let mut codegen = Codegen::new();
     codegen.compile(&module);
-
-    let main_ptr = codegen.get_fn_ptr("main");
-    let main_fn: fn() -> i64 = unsafe { std::mem::transmute(main_ptr) };
-    let result = main_fn();
-    println!("Result: {}", result);
 }

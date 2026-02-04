@@ -1,6 +1,6 @@
 use crate::hir::expr::HirExpr;
 use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId, TyExprId};
-use crate::hir::items::{HirFuncParam, HirEnum, HirFunc, HirGlobalVariable, HirItem};
+use crate::hir::items::{HirFuncParam, HirEnum, HirFunc, HirGlobalVariable, HirItem, HirExternFunc};
 use crate::hir::module::HirModule;
 use crate::hir::stmt::{HirStmt, HirStmtKind};
 use crate::hir::types::HirType;
@@ -75,6 +75,25 @@ impl<'a> HirBuilder<'a> {
         Ok(id)
     }
 
+    pub fn create_extern_func(
+        &mut self,
+        abi: Option<String>,
+        name: &str,
+        ret: TyExprId,
+        param: Vec<HirFuncParam>,
+    ) -> Result<DefId, HirBuilderError> {
+        let id = DefId(self.module.items.len());
+        let func = HirExternFunc {
+            abi,
+            name: name.to_string(),
+            param,
+            ret,
+            id,
+        };
+        self.module.items.push(HirItem::ExternFunc(func));
+        Ok(id)
+    }
+
     pub fn create_global_var(&mut self, name: &str, ty: Option<TyExprId>, value: ExprId) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let gv = HirGlobalVariable {
@@ -93,6 +112,17 @@ impl<'a> HirBuilder<'a> {
             id,
         };
         self.module.items.push(HirItem::Enum(e));
+        Ok(id)
+    }
+
+    pub fn create_struct(&mut self, name: &str, fields: Vec<crate::hir::items::HirStructField>) -> Result<DefId, HirBuilderError> {
+        let id = DefId(self.module.items.len());
+        let s = crate::hir::items::HirStruct {
+            name: name.to_string(),
+            fields,
+            id,
+        };
+        self.module.items.push(HirItem::Struct(s));
         Ok(id)
     }
 

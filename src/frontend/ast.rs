@@ -22,6 +22,14 @@ pub enum AstNode {
         name: String,
         variants: Vec<EnumVariant>,
     },
+    ExternBlock {
+        abi: Option<String>,
+        functions: Vec<ExternFunc>,
+    },
+    ExternDecl {
+        abi: Option<String>,
+        function: ExternFunc,
+    },
     Return(Box<AstNode>),
     Block {
         statements: Vec<AstNode>,
@@ -38,6 +46,10 @@ pub enum AstNode {
         func: Box<AstNode>,
         args: Vec<AstNode>,
     },
+    StructInst {
+        name: String,
+        fields: Vec<(String, AstNode)>,
+    },
     
     // Primary Expressions
     Identifier(String),
@@ -48,6 +60,13 @@ pub enum AstNode {
 pub struct FuncParam {
     pub name: String,
     pub type_expr: Box<AstNode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternFunc {
+    pub name: String,
+    pub params: Vec<FuncParam>,
+    pub return_type: Option<Box<AstNode>>,
 }
 
 #[derive(Debug, Clone)]

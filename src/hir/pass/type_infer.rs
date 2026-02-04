@@ -47,6 +47,15 @@ impl<'a> TypeInfer<'a> {
                     let ty = self.get_or_create_type(HirType::Func(sig));
                     self.item_types.insert(i, ty);
                 }
+                HirItem::ExternFunc(func) => {
+                    let ret_ty = self.resolve_type_expr(func.ret)?;
+                    let mut sig = vec![ret_ty];
+                    for param in &func.param {
+                        sig.push(self.resolve_type_expr(param.type_expr)?);
+                    }
+                    let ty = self.get_or_create_type(HirType::Func(sig));
+                    self.item_types.insert(i, ty);
+                }
                 HirItem::GlobalVariable(gv) => {
                     let ty = if let Some(ty_expr) = gv.ty {
                         self.resolve_type_expr(ty_expr)?
@@ -221,6 +230,40 @@ impl<'a> TypeInfer<'a> {
                 }
                 last_ty
             }
+            HirExprKind::StructInst { ref struct_name, ref fields } => {
+                let mut struct_def = None;
+                let mut def_id = None;
+                for (i, item) in self.module.items.iter().enumerate() {
+                    if let HirItem::Struct(s) = item {
+                        if &s.name == struct_name {
+                            struct_def = Some(s.clone());
+                            def_id = Some(crate::hir::id::DefId(i));
+                            break;
+                        }
+                    }
+                }
+
+                if let (Some(s), Some(did)) = (struct_def, def_id) {
+                    for (f_name, f_expr_id) in fields {
+                        let f_ty = self.infer_expr(*f_expr_id)?;
+                        let mut found = false;
+                        for s_field in &s.fields {
+                            if &s_field.name == f_name {
+                                let expected_f_ty = self.resolve_type_expr(s_field.type_expr)?;
+                                self.unify(f_ty, expected_f_ty)?;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            return Err(format!("Field {} not found in struct {}", f_name, struct_name));
+                        }
+                    }
+                    self.get_or_create_type(HirType::Struct(did))
+                } else {
+                    return Err(format!("Struct {} not found", struct_name));
+                }
+            }
         };
         
         self.module.exprs[expr_id.0].ty = Some(ty);
@@ -237,7 +280,23 @@ impl<'a> TypeInfer<'a> {
                 } else if name == "bool" {
                     self.get_or_create_type(HirType::Bool)
                 } else {
-                    self.get_or_create_type(HirType::Unknown)
+                    // 查找结构体
+                    let mut struct_id = None;
+                    for (i, item) in self.module.items.iter().enumerate() {
+                        match item {
+                            HirItem::Struct(s) if s.name == name => {
+                                struct_id = Some(crate::hir::id::DefId(i));
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(def_id) = struct_id {
+                        self.get_or_create_type(HirType::Struct(def_id))
+                    } else {
+                        self.get_or_create_type(HirType::Unknown)
+                    }
                 }
             }
             HirTypeExprKind::Func(params, ret) => {

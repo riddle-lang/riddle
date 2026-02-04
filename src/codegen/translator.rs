@@ -1,0 +1,141 @@
+use std::collections::HashMap;
+use cranelift::prelude::*;
+use cranelift_jit::JITModule;
+use cranelift_module::{Module, FuncId};
+use crate::hir::module::HirModule;
+use crate::hir::id::{DefId, LocalId, ExprId, StmtId};
+use crate::hir::items::HirItem;
+use crate::hir::expr::{HirExprKind, HirLiteral};
+use crate::hir::stmt::HirStmtKind;
+
+pub struct FunctionTranslator<'a> {
+    pub(crate) builder: FunctionBuilder<'a>,
+    pub(crate) module: &'a mut JITModule,
+    pub(crate) fn_ids: &'a HashMap<DefId, FuncId>,
+    pub(crate) variables: HashMap<LocalId, Variable>,
+    pub(crate) hir: &'a HirModule,
+}
+
+impl<'a> FunctionTranslator<'a> {
+    pub fn translate_stmt(&mut self, stmt_id: StmtId) {
+        let stmt = &self.hir.stmts[stmt_id.0];
+        match &stmt.kind {
+            HirStmtKind::Expr { expr, .. } => {
+                self.translate_expr(*expr);
+            }
+            HirStmtKind::Let { init, id, .. } => {
+                let var = Variable::new(id.0);
+                self.builder.declare_var(var, types::I64);
+                if let Some(init_expr) = init {
+                    let val = self.translate_expr(*init_expr);
+                    self.builder.def_var(var, val);
+                }
+                self.variables.insert(*id, var);
+            }
+            HirStmtKind::Return { value } => {
+                let mut vals = Vec::new();
+                if let Some(expr_id) = value {
+                    vals.push(self.translate_expr(*expr_id));
+                } else {
+                    // Default return 0 if no value
+                    vals.push(self.builder.ins().iconst(types::I64, 0));
+                }
+                self.builder.ins().return_(&vals);
+            }
+        }
+    }
+
+    pub fn translate_expr(&mut self, expr_id: ExprId) -> Value {
+        let expr = &self.hir.exprs[expr_id.0];
+        match &expr.kind {
+            HirExprKind::Literal(lit) => {
+                match lit {
+                    HirLiteral::Int(i) => self.builder.ins().iconst(types::I64, *i),
+                    _ => unimplemented!("Literal type not supported yet"),
+                }
+            }
+            HirExprKind::BinaryOp { lhs, op, rhs } => {
+                let l = self.translate_expr(*lhs);
+                let r = self.translate_expr(*rhs);
+                match op.as_str() {
+                    "+" => self.builder.ins().iadd(l, r),
+                    "-" => self.builder.ins().isub(l, r),
+                    "*" => self.builder.ins().imul(l, r),
+                    "/" => self.builder.ins().sdiv(l, r),
+                    _ => unimplemented!("Operator {} not supported", op),
+                }
+            }
+            HirExprKind::Symbol { name, id } => {
+                if let Some(local_id) = id {
+                    if let Some(var) = self.variables.get(local_id) {
+                        self.builder.use_var(*var)
+                    } else {
+                        // 可能是函数名，如果 NamePass 没把函数名当作 LocalId
+                        self.resolve_fn_call(name, &[])
+                    }
+                } else {
+                    self.resolve_fn_call(name, &[])
+                }
+            }
+            HirExprKind::Call { callee, args } => {
+                let callee_expr = &self.hir.exprs[callee.0];
+                if let HirExprKind::Symbol { name, .. } = &callee_expr.kind {
+                    let mut arg_vals = Vec::new();
+                    for arg in args {
+                        arg_vals.push(self.translate_expr(*arg));
+                    }
+                    self.resolve_fn_call(name, &arg_vals)
+                } else {
+                    unimplemented!("Indirect calls not supported yet")
+                }
+            }
+            HirExprKind::Block { stmts } => {
+                let mut last_val = self.builder.ins().iconst(types::I64, 0);
+                for &stmt_id in stmts {
+                    let stmt = &self.hir.stmts[stmt_id.0];
+                    if let HirStmtKind::Expr { expr, .. } = &stmt.kind {
+                        last_val = self.translate_expr(*expr);
+                    } else {
+                        self.translate_stmt(stmt_id);
+                    }
+                }
+                last_val
+            }
+            HirExprKind::StructInst { fields, .. } => {
+                for (_, expr_id) in fields {
+                    self.translate_expr(*expr_id);
+                }
+                self.builder.ins().iconst(types::I64, 0)
+            }
+        }
+    }
+
+    fn resolve_fn_call(&mut self, name: &str, args: &[Value]) -> Value {
+        let mut target_fn_id = None;
+        for item in &self.hir.items {
+            match item {
+                HirItem::Func(f) => {
+                    if f.name == name {
+                        target_fn_id = Some(self.fn_ids[&f.id]);
+                        break;
+                    }
+                }
+                HirItem::ExternFunc(f) => {
+                    if f.name == name {
+                        target_fn_id = Some(self.fn_ids[&f.id]);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(fn_id) = target_fn_id {
+            let local_func = self.module.declare_func_in_func(fn_id, &mut self.builder.func);
+            let call = self.builder.ins().call(local_func, args);
+            self.builder.inst_results(call)[0]
+        } else {
+            panic!("Function {} not found", name);
+        }
+    }
+}

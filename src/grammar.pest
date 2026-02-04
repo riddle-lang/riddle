@@ -9,14 +9,20 @@ statement = _{
       block
     | var_decl
     | func_decl
+    | extern_block
+    | extern_decl
     | struct_decl
     | enum_decl
     | return_stmt
     | expr_stmt
 }
 
-var_decl  = { "var" ~ identifier ~ (":" ~ type_expr)? ~ ("=" ~ value_expr)? ~ ";" }
-type_expr = { expr }
+extern_block = { "extern" ~ string? ~ "{" ~ extern_item* ~ "}" }
+extern_decl  = { "extern" ~ string? ~ extern_item }
+extern_item  = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
+
+var_decl  = { ("var" | "let") ~ identifier ~ (":" ~ type_expr)? ~ ("=" ~ value_expr)? ~ ";" }
+type_expr = { identifier }
 value_expr = { expr }
 
 func_param = { identifier ~ ":" ~ type_expr }
@@ -41,7 +47,9 @@ expr = _{ binary_expr }
 
 binary_expr  = { postfix_expr ~ (op ~ postfix_expr)* }
 
-postfix_expr = { primary_expr ~ call_suffix* }
+postfix_expr = { primary_expr ~ (call_suffix | struct_inst)* }
+struct_inst = { "{" ~ (struct_inst_field ~ ("," ~ struct_inst_field)*)? ~ ","? ~ "}" }
+struct_inst_field = { identifier ~ ":" ~ expr }
 
 call_suffix = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 
@@ -56,14 +64,14 @@ literal = _{ float | number | string | bool }
 
 bool   = { "true" | "false" }
 
-float  = { number ~ "." ~ number }
+float  = @{ number ~ "." ~ number }
 
-number = { "0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* }
+number = @{ "0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* }
 
 string = { "\"" ~ (escape | (!"\"" ~ ANY))* ~ "\"" }
 escape = { "\\" ~ ( "\"" | "\\" | "n" | "r" | "t" | "0" ) }
 
-identifier = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 op = @{ op_char+ }
 op_char = { "+" | "-" | "*" | "/" | "!" | "@" | "%" | "^" | "&" | "=" | "~" | "<" | ">" }

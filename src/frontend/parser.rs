@@ -1,6 +1,6 @@
 use pest::Parser;
 use pest_derive::Parser;
-use crate::frontend::ast::{AstNode, Literal, FuncParam, StructField, EnumVariant};
+use crate::frontend::ast::{AstNode, Literal, FuncParam, StructField, EnumVariant, ExternFunc};
 use pest::iterators::Pair;
 
 #[derive(Parser)]
@@ -10,6 +10,35 @@ struct RiddleParser;
 pub fn parse(input: &str) -> Result<AstNode, pest::error::Error<Rule>> {
     let pairs = RiddleParser::parse(Rule::program, input)?;
     Ok(parse_pair(pairs.into_iter().next().unwrap()))
+}
+
+fn parse_extern_item(pair: Pair<Rule>) -> ExternFunc {
+    let mut inner = pair.into_inner();
+    let name = inner.next().unwrap().as_str().to_string();
+    let mut params = Vec::new();
+    let mut return_type = None;
+    for p in inner {
+        match p.as_rule() {
+            Rule::func_param => {
+                let mut p_inner = p.into_inner();
+                let p_name = p_inner.next().unwrap().as_str().to_string();
+                let p_type = Box::new(parse_pair(p_inner.next().unwrap().into_inner().next().unwrap()));
+                params.push(FuncParam {
+                    name: p_name,
+                    type_expr: p_type,
+                });
+            }
+            Rule::type_expr => {
+                return_type = Some(Box::new(parse_pair(p.into_inner().next().unwrap())))
+            }
+            _ => unreachable!(),
+        }
+    }
+    ExternFunc {
+        name,
+        params,
+        return_type,
+    }
 }
 
 fn parse_pair(pair: Pair<Rule>) -> AstNode {
@@ -109,6 +138,40 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
             }
             AstNode::EnumDecl { name, variants }
         }
+        Rule::extern_block => {
+            let mut abi = None;
+            let mut functions = Vec::new();
+            for p in pair.into_inner() {
+                match p.as_rule() {
+                    Rule::string => {
+                        let s = p.as_str();
+                        abi = Some(s[1..s.len()-1].to_string());
+                    }
+                    Rule::extern_item => {
+                        functions.push(parse_extern_item(p));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            AstNode::ExternBlock { abi, functions }
+        }
+        Rule::extern_decl => {
+            let mut abi = None;
+            let mut function = None;
+            for p in pair.into_inner() {
+                match p.as_rule() {
+                    Rule::string => {
+                        let s = p.as_str();
+                        abi = Some(s[1..s.len()-1].to_string());
+                    }
+                    Rule::extern_item => {
+                        function = Some(parse_extern_item(p));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            AstNode::ExternDecl { abi, function: function.unwrap() }
+        }
         Rule::block => {
             let mut inner = pair.into_inner().peekable();
             let mut statements = Vec::new();
@@ -149,12 +212,27 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
             for p in inner {
                 match p.as_rule() {
                     Rule::call_suffix => {
-                        debug_assert!(p.as_rule() == Rule::call_suffix);
                         let args = p.into_inner().map(parse_pair).collect();
                         expr = AstNode::Call {
                             func: Box::new(expr),
                             args,
                         };
+                    }
+                    Rule::struct_inst => {
+                        if let AstNode::Identifier(name) = expr {
+                            let mut fields = Vec::new();
+                            for f in p.into_inner() {
+                                if f.as_rule() == Rule::struct_inst_field {
+                                    let mut f_inner = f.into_inner();
+                                    let f_name = f_inner.next().unwrap().as_str().to_string();
+                                    let f_expr = parse_pair(f_inner.next().unwrap());
+                                    fields.push((f_name, f_expr));
+                                }
+                            }
+                            expr = AstNode::StructInst { name, fields };
+                        } else {
+                            panic!("Struct instantiation must follow an identifier");
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -166,9 +244,8 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
         Rule::number => AstNode::Literal(Literal::Int(pair.as_str().parse().unwrap())),
         Rule::float => AstNode::Literal(Literal::Float(pair.as_str().parse().unwrap())),
         Rule::string => {
-            let mut inner = pair.into_inner();
-            let content = inner.next().map(|p| p.as_str().to_string()).unwrap_or_default();
-            AstNode::Literal(Literal::Str(content))
+            let s = pair.as_str();
+            AstNode::Literal(Literal::Str(s[1..s.len()-1].to_string()))
         }
         _ => todo!("Rule {:?} not implemented", pair.as_rule()),
     }

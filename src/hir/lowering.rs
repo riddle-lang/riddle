@@ -2,7 +2,7 @@ use crate::frontend::ast::{AstNode, Literal};
 use crate::hir::builder::HirBuilder;
 use crate::hir::expr::{HirExpr, HirExprKind, HirLiteral};
 use crate::hir::id::TyExprId;
-use crate::hir::items::HirFuncParam;
+use crate::hir::items::{HirFuncParam, HirStructField};
 use crate::hir::module::HirModule;
 use crate::hir::type_expr::{HirTypeExpr, HirTypeExprKind};
 
@@ -88,6 +88,33 @@ impl<'a> AstLower<'a> {
                     self.lower_block(body)?;
                     self.deep -= 1;
                 }
+                AstNode::StructDecl { name, fields } => {
+                    let mut hir_fields = Vec::new();
+                    for field in fields {
+                        let type_expr = self.lower_type_expr(&field.type_expr)?;
+                        let type_expr_id = self.builder.create_type_expr(type_expr);
+                        hir_fields.push(HirStructField {
+                            name: field.name.clone(),
+                            type_expr: type_expr_id,
+                        });
+                    }
+                    self.builder
+                        .create_struct(name, hir_fields)
+                        .map_err(|_| "Failed to create struct".to_string())?;
+                }
+                AstNode::EnumDecl { name, .. } => {
+                    self.builder
+                        .create_enum(name)
+                        .map_err(|_| "Failed to create enum".to_string())?;
+                }
+                AstNode::ExternBlock { abi, functions } => {
+                    for func in functions {
+                        self.lower_extern_func(abi.clone(), func)?;
+                    }
+                }
+                AstNode::ExternDecl { abi, function } => {
+                    self.lower_extern_func(abi.clone(), function)?;
+                }
                 _ => {
                     return Err("Expected statement".to_string());
                 }
@@ -96,12 +123,39 @@ impl<'a> AstLower<'a> {
         Ok(())
     }
 
-    fn lower_type_expr(&mut self, type_expr: &Box<AstNode>) -> Result<HirTypeExpr, String> {
-        let ty = match type_expr.as_ref() {
-            AstNode::Identifier(name) => HirTypeExpr::new(HirTypeExprKind::Path(name.clone())),
-            _ => todo!(),
+    fn lower_extern_func(
+        &mut self,
+        abi: Option<String>,
+        func: &crate::frontend::ast::ExternFunc,
+    ) -> Result<(), String> {
+        let mut p = Vec::new();
+        for param in &func.params {
+            let type_expr = self.lower_type_expr(&param.type_expr)?;
+            let type_expr = self.builder.create_type_expr(type_expr);
+            let id = self.builder.next_local_id();
+            p.push(HirFuncParam {
+                name: param.name.clone(),
+                type_expr,
+                id,
+            })
+        }
+        let ret = match &func.return_type {
+            Some(ret_type) => self.lower_type_expr(ret_type)?,
+            None => HirTypeExpr::new(HirTypeExprKind::Unit),
         };
-        Ok(ty)
+        let ret = self.builder.create_type_expr(ret);
+
+        self.builder
+            .create_extern_func(abi, &func.name, ret, p)
+            .map_err(|_| "Failed to create extern function".to_string())?;
+        Ok(())
+    }
+
+    fn lower_type_expr(&mut self, type_expr: &Box<AstNode>) -> Result<HirTypeExpr, String> {
+        match type_expr.as_ref() {
+            AstNode::Identifier(name) => Ok(HirTypeExpr::new(HirTypeExprKind::Path(name.clone()))),
+            _ => Err(format!("Unexpected node in type expr: {:?}", type_expr)),
+        }
     }
 
     fn lower_optional_type_expr(
@@ -222,6 +276,18 @@ impl<'a> AstLower<'a> {
                 Ok(HirExpr::new(HirExprKind::Call {
                     callee,
                     args: arg_ids,
+                }))
+            }
+            AstNode::StructInst { name, fields } => {
+                let mut hir_fields = Vec::new();
+                for (f_name, f_expr) in fields {
+                    let f_expr = self.lower_expr(f_expr)?;
+                    let f_expr_id = self.builder.create_expr(f_expr);
+                    hir_fields.push((f_name.clone(), f_expr_id));
+                }
+                Ok(HirExpr::new(HirExprKind::StructInst {
+                    struct_name: name.clone(),
+                    fields: hir_fields,
                 }))
             }
             _ => todo!(),

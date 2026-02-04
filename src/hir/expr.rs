@@ -31,6 +31,10 @@ pub enum HirExprKind {
     Block {
         stmts: Vec<StmtId>,
     },
+    StructInst {
+        struct_name: String,
+        fields: Vec<(String, ExprId)>,
+    },
 }
 
 #[derive(Debug, Clone)]

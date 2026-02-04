@@ -7,4 +7,4 @@ pub mod stmt;
 pub mod builder;
 pub mod type_expr;
 pub mod lowering;
-pub(crate) mod pass;
+pub mod pass;

@@ -53,10 +53,11 @@ impl<'a> NamePass<'a> {
                 HirItem::Func(_) => {
                     self.process_func(i);
                 }
+                HirItem::ExternFunc(_) => {}
                 HirItem::GlobalVariable(gv) => {
                     self.process_expr(gv.value);
                 }
-                _ => {}
+                HirItem::Enum(_) | HirItem::Struct(_) => {}
             }
         }
     }
@@ -131,6 +132,12 @@ impl<'a> NamePass<'a> {
                     self.process_stmt(stmt_id);
                 }
                 self.pop_scope();
+            }
+            HirExprKind::StructInst { ref fields, .. } => {
+                let fields_clone = fields.clone();
+                for (_, expr_id) in fields_clone {
+                    self.process_expr(expr_id);
+                }
             }
             _ => {}
         }
