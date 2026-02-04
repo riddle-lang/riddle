@@ -1,6 +1,6 @@
 use pest::Parser;
 use pest_derive::Parser;
-use crate::frontend::ast::{AstNode, Literal, FuncParam, StructField, EnumVariant, ExternFunc};
+use crate::frontend::ast::{AstNode, Literal, FuncParam, StructField, EnumVariant, ExternFunc, TraitItem};
 use pest::iterators::Pair;
 
 #[derive(Parser)]
@@ -138,6 +138,76 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
             }
             AstNode::EnumDecl { name, variants }
         }
+        Rule::trait_decl => {
+            let mut inner = pair.into_inner();
+            let name = inner.next().unwrap().as_str().to_string();
+            let mut items = Vec::new();
+            for p in inner {
+                match p.as_rule() {
+                    Rule::trait_item => {
+                        let mut item_inner = p.into_inner();
+                        let item_name = item_inner.next().unwrap().as_str().to_string();
+                        let mut params = Vec::new();
+                        let mut return_type = None;
+                        for param_p in item_inner {
+                            match param_p.as_rule() {
+                                Rule::func_param => {
+                                    let mut p_inner = param_p.into_inner();
+                                    let p_name = p_inner.next().unwrap().as_str().to_string();
+                                    let p_type = Box::new(parse_pair(p_inner.next().unwrap().into_inner().next().unwrap()));
+                                    params.push(FuncParam { name: p_name, type_expr: p_type });
+                                }
+                                Rule::type_expr => return_type = Some(Box::new(parse_pair(param_p.into_inner().next().unwrap()))),
+                                _ => unreachable!(),
+                            }
+                        }
+                        items.push(TraitItem { name: item_name, params, return_type });
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            AstNode::TraitDecl { name, items }
+        }
+        Rule::impl_decl => {
+            let mut trait_name: Option<String> = None;
+            let mut target_name: String = String::new();
+            let mut items: Vec<AstNode> = Vec::new();
+
+            let mut got_first_ident = false;
+            let mut first_ident = String::new();
+
+            for p in pair.into_inner() {
+                match p.as_rule() {
+                    Rule::identifier => {
+                        if !got_first_ident {
+                            got_first_ident = true;
+                            first_ident = p.as_str().to_string();
+                        } else {
+                            // Unexpected extra identifier (shouldn't happen with current grammar)
+                            target_name = p.as_str().to_string();
+                        }
+                    }
+                    Rule::type_expr => {
+                        // If we see a type_expr after first identifier, it's the target of `for` clause
+                        trait_name = Some(first_ident.clone());
+                        // type_expr reduces to an identifier path in our grammar
+                        let t = p.into_inner().next().unwrap().as_str().to_string();
+                        target_name = t;
+                    }
+                    Rule::func_decl => {
+                        items.push(parse_pair(p));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            if target_name.is_empty() {
+                // Inherent impl: `impl Type { ... }`
+                target_name = first_ident;
+            }
+
+            AstNode::ImplDecl { trait_name, target_name, items }
+        }
         Rule::extern_block => {
             let mut abi = None;
             let mut functions = Vec::new();
@@ -233,6 +303,13 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                         } else {
                             panic!("Struct instantiation must follow an identifier");
                         }
+                    }
+                    Rule::member_access => {
+                        let member = p.into_inner().next().unwrap().as_str().to_string();
+                        expr = AstNode::MemberAccess {
+                            object: Box::new(expr),
+                            member,
+                        };
                     }
                     _ => unreachable!(),
                 }

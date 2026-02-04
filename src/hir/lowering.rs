@@ -2,7 +2,7 @@ use crate::frontend::ast::{AstNode, Literal};
 use crate::hir::builder::HirBuilder;
 use crate::hir::expr::{HirExpr, HirExprKind, HirLiteral};
 use crate::hir::id::TyExprId;
-use crate::hir::items::{HirFuncParam, HirStructField};
+use crate::hir::items::{HirFuncParam, HirStructField, HirTraitItem};
 use crate::hir::module::HirModule;
 use crate::hir::type_expr::{HirTypeExpr, HirTypeExprKind};
 
@@ -106,6 +106,73 @@ impl<'a> AstLower<'a> {
                     self.builder
                         .create_enum(name)
                         .map_err(|_| "Failed to create enum".to_string())?;
+                }
+                AstNode::TraitDecl { name, items } => {
+                    let mut hir_items = Vec::new();
+                    for item in items {
+                        // Lower params
+                        let mut params = Vec::new();
+                        for p in &item.params {
+                            let type_expr = self.lower_type_expr(&p.type_expr)?;
+                            let type_expr = self.builder.create_type_expr(type_expr);
+                            let id = self.builder.next_local_id();
+                            params.push(HirFuncParam {
+                                name: p.name.clone(),
+                                type_expr,
+                                id,
+                            });
+                        }
+                        // Lower return type
+                        let ret_te = if let Some(ret) = &item.return_type {
+                            self.lower_type_expr(ret)?
+                        } else {
+                            crate::hir::type_expr::HirTypeExpr::new(crate::hir::type_expr::HirTypeExprKind::Unit)
+                        };
+                        let ret = self.builder.create_type_expr(ret_te);
+                        hir_items.push(HirTraitItem { name: item.name.clone(), params, ret });
+                    }
+                    self.builder
+                        .create_trait(name, hir_items)
+                        .map_err(|_| "Failed to create trait".to_string())?;
+                }
+                AstNode::ImplDecl { trait_name, target_name, items } => {
+                    let mut methods = Vec::new();
+                    for it in items {
+                        if let AstNode::FuncDecl { name, params, return_type, body } = it {
+                            let mut p = Vec::new();
+                            for param in params {
+                                let type_expr = self.lower_type_expr(&param.type_expr)?;
+                                let type_expr = self.builder.create_type_expr(type_expr);
+                                let id = self.builder.next_local_id();
+                                p.push(HirFuncParam {
+                                    name: param.name.clone(),
+                                    type_expr,
+                                    id,
+                                })
+                            }
+                            let ret = match return_type {
+                                Some(ret_type) => self.lower_type_expr(ret_type)?,
+                                None => HirTypeExpr::new(HirTypeExprKind::Unit),
+                            };
+                            let ret = self.builder.create_type_expr(ret);
+
+                            let mangled_name = format!("{}::{}", target_name, name);
+                            let func_id = self
+                                .builder
+                                .create_func(&mangled_name, ret, p)
+                                .map_err(|_| "Failed to create function".to_string())?;
+
+                            self.builder.set_func(func_id);
+                            self.deep += 1;
+                            self.lower_block(&body)?;
+                            self.deep -= 1;
+
+                            methods.push(func_id);
+                        }
+                    }
+                    self.builder
+                        .create_impl(trait_name.clone(), target_name.clone(), methods)
+                        .map_err(|_| "Failed to create impl".to_string())?;
                 }
                 AstNode::ExternBlock { abi, functions } => {
                     for func in functions {
@@ -288,6 +355,15 @@ impl<'a> AstLower<'a> {
                 Ok(HirExpr::new(HirExprKind::StructInst {
                     struct_name: name.clone(),
                     fields: hir_fields,
+                }))
+            }
+            AstNode::MemberAccess { object, member } => {
+                let object = self.lower_expr(object)?;
+                let object = self.builder.create_expr(object);
+                Ok(HirExpr::new(HirExprKind::MemberAccess {
+                    object,
+                    member: member.clone(),
+                    id: None,
                 }))
             }
             _ => todo!(),

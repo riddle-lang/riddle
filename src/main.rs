@@ -20,13 +20,23 @@ fn main() {
 
         extern "C" fun test1(x: int, y: int) -> int;
 
+        trait TestTrait {
+            fun test(x: int, y: int) -> int;
+        }
+
+        impl TestTrait for Foo {
+            fun test(x: int, y: int) -> int {
+                return (x * y) - (x / y);
+            }
+        }
+
         fun test(x: int, y: int) -> int {
             return (x * y) - (x / y);
         }
         
         fun main() -> int {
             let x: Foo = Foo { x: 1 };
-            return test(10, 2);
+            return x.test(1, 2);
         }
     "#;
 
@@ -51,4 +61,6 @@ fn main() {
 
     let mut codegen = Codegen::new();
     codegen.compile(&module);
+    let bytes = codegen.finish();
+    std::fs::write("out.o", bytes).unwrap();
 }

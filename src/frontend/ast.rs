@@ -22,6 +22,15 @@ pub enum AstNode {
         name: String,
         variants: Vec<EnumVariant>,
     },
+    TraitDecl {
+        name: String,
+        items: Vec<TraitItem>,
+    },
+    ImplDecl {
+        trait_name: Option<String>,
+        target_name: String,
+        items: Vec<AstNode>,
+    },
     ExternBlock {
         abi: Option<String>,
         functions: Vec<ExternFunc>,
@@ -50,6 +59,10 @@ pub enum AstNode {
         name: String,
         fields: Vec<(String, AstNode)>,
     },
+    MemberAccess {
+        object: Box<AstNode>,
+        member: String,
+    },
     
     // Primary Expressions
     Identifier(String),
@@ -64,6 +77,13 @@ pub struct FuncParam {
 
 #[derive(Debug, Clone)]
 pub struct ExternFunc {
+    pub name: String,
+    pub params: Vec<FuncParam>,
+    pub return_type: Option<Box<AstNode>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitItem {
     pub name: String,
     pub params: Vec<FuncParam>,
     pub return_type: Option<Box<AstNode>>,

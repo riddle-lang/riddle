@@ -1,24 +1,37 @@
 use std::collections::HashMap;
+use cranelift::codegen::ir::UserFuncName;
 use cranelift::prelude::*;
 use cranelift::prelude::isa::CallConv;
-use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_object::{ObjectBuilder, ObjectModule};
 use cranelift_module::{Linkage, Module, FuncId};
 use crate::hir::module::HirModule;
 use crate::hir::id::DefId;
-use crate::hir::items::{HirItem, HirFunc};
+use crate::hir::items::{HirItem, HirFunc, HirExternFunc};
 use crate::codegen::translator::FunctionTranslator;
 
 pub struct Codegen {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
-    module: JITModule,
+    module: ObjectModule,
     fn_ids: HashMap<DefId, FuncId>,
 }
 
 impl Codegen {
     pub fn new() -> Self {
-        let builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
-        let module = JITModule::new(builder);
+        let flag_builder = settings::builder();
+        let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
+            panic!("host machine is not supported: {}", msg);
+        });
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
+        let builder = ObjectBuilder::new(
+            isa,
+            "riddle".to_string(),
+            cranelift_module::default_libcall_names(),
+        )
+        .unwrap();
+        let module = ObjectModule::new(builder);
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
@@ -48,8 +61,8 @@ impl Codegen {
                     // 处理 ABI
                     if let Some(abi) = &func.abi {
                         match abi.as_str() {
-                            "C" => sig.call_conv = CallConv::SystemV, // 简化处理
-                            "C++" => sig.call_conv = CallConv::SystemV, // 实际上在 Cranelift 中通常也是这个
+                            "C" => sig.call_conv = CallConv::SystemV,
+                            "C++" => sig.call_conv = CallConv::SystemV,
                             _ => {}
                         }
                     }
@@ -63,6 +76,7 @@ impl Codegen {
                         .declare_function(&func.name, Linkage::Import, &sig)
                         .unwrap();
                     self.fn_ids.insert(func.id, fn_id);
+                    self.print_extern_decl(func, &sig);
                 }
                 _ => {}
             }
@@ -75,8 +89,26 @@ impl Codegen {
                 self.compile_func(func, hir);
             }
         }
+    }
 
-        self.module.finalize_definitions().unwrap();
+    fn print_extern_decl(&self, func: &HirExternFunc, sig: &Signature) {
+        let params = sig
+            .params
+            .iter()
+            .map(|p| format!("{}", p.value_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let returns = if sig.returns.is_empty() {
+            "void".to_string()
+        } else {
+            sig.returns
+                .iter()
+                .map(|r| format!("{}", r.value_type))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let abi = func.abi.as_deref().unwrap_or("default");
+        println!("declare extern {:?} {}({}) -> {}", abi, func.name, params, returns);
     }
 
     fn compile_func(&mut self, func: &HirFunc, hir: &HirModule) {
@@ -94,6 +126,8 @@ impl Codegen {
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
         builder.seal_block(entry_block);
+        let pretty = format!("{}#{}", func.name, fn_id.as_u32());
+        builder.func.name = UserFuncName::testcase(pretty);
 
         let mut translator = FunctionTranslator {
             builder,
@@ -121,12 +155,8 @@ impl Codegen {
         self.module.clear_context(&mut self.ctx);
     }
 
-    pub fn get_fn_ptr(&mut self, name: &str) -> *const u8 {
-        let fn_id = self.module.get_name(name).expect("Function not found");
-        if let cranelift_module::FuncOrDataId::Func(id) = fn_id {
-            self.module.get_finalized_function(id)
-        } else {
-            panic!("Not a function")
-        }
+    pub fn finish(self) -> Vec<u8> {
+        let product = self.module.finish();
+        product.emit().unwrap()
     }
 }

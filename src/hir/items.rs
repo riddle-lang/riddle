@@ -7,6 +7,30 @@ pub enum HirItem {
     Struct(HirStruct),
     GlobalVariable(HirGlobalVariable),
     ExternFunc(HirExternFunc),
+    Trait(HirTrait),
+    Impl(HirImpl),
+}
+
+#[derive(Debug, Clone)]
+pub struct HirTrait {
+    pub name: String,
+    pub id: DefId,
+    pub items: Vec<HirTraitItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirTraitItem {
+    pub name: String,
+    pub params: Vec<HirFuncParam>,
+    pub ret: TyExprId,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirImpl {
+    pub trait_name: Option<String>,
+    pub target_name: String,
+    pub items: Vec<DefId>,
+    pub id: DefId,
 }
 
 #[derive(Debug, Clone)]

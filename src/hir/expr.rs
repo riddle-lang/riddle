@@ -1,4 +1,4 @@
-use crate::hir::id::{ExprId, LocalId, StmtId, TyId};
+use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId};
 
 #[derive(Debug, Clone)]
 pub struct HirExpr {
@@ -34,6 +34,11 @@ pub enum HirExprKind {
     StructInst {
         struct_name: String,
         fields: Vec<(String, ExprId)>,
+    },
+    MemberAccess {
+        object: ExprId,
+        member: String,
+        id: Option<DefId>,
     },
 }
 

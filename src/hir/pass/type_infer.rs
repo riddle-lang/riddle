@@ -264,6 +264,58 @@ impl<'a> TypeInfer<'a> {
                     return Err(format!("Struct {} not found", struct_name));
                 }
             }
+            HirExprKind::MemberAccess { object, ref member, .. } => {
+                let obj_ty = self.infer_expr(object)?;
+                let obj_ty_followed = self.follow_id(obj_ty);
+                let obj_hir_ty = self.module.types[obj_ty_followed.0].clone();
+                let mut resolved_id = None;
+                let ty = match obj_hir_ty {
+                    HirType::Struct(def_id) => {
+                        let mut member_ty = None;
+                        let (s_name, s_fields) = if let HirItem::Struct(s) = &self.module.items[def_id.0] {
+                            (s.name.clone(), s.fields.clone())
+                        } else {
+                            return Err("Expected struct item".to_string());
+                        };
+
+                        // 1. Check fields
+                        for field in &s_fields {
+                            if &field.name == member {
+                                member_ty = Some(self.resolve_type_expr(field.type_expr)?);
+                                break;
+                            }
+                        }
+
+                        if member_ty.is_none() {
+                            // 2. Check impls
+                            for i in 0..self.module.items.len() {
+                                if let HirItem::Impl(im) = &self.module.items[i] {
+                                    if im.target_name == s_name {
+                                        for method_def_id in &im.items {
+                                            if let HirItem::Func(f) = &self.module.items[method_def_id.0] {
+                                                if f.name == format!("{}::{}", s_name, member) {
+                                                    member_ty = self.item_types.get(&method_def_id.0).copied();
+                                                    resolved_id = Some(*method_def_id);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if member_ty.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                        member_ty.ok_or_else(|| format!("Member {} not found on struct {}", member, s_name))?
+                    }
+                    _ => self.new_infer_ty(),
+                };
+                if let HirExprKind::MemberAccess { id, .. } = &mut self.module.exprs[expr_id.0].kind {
+                    *id = resolved_id;
+                }
+                ty
+            }
         };
         
         self.module.exprs[expr_id.0].ty = Some(ty);

@@ -1,6 +1,6 @@
 use crate::hir::expr::HirExpr;
 use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId, TyExprId};
-use crate::hir::items::{HirFuncParam, HirEnum, HirFunc, HirGlobalVariable, HirItem, HirExternFunc};
+use crate::hir::items::{HirFuncParam, HirEnum, HirFunc, HirGlobalVariable, HirItem, HirExternFunc, HirTrait, HirTraitItem, HirImpl, HirStructField, HirStruct};
 use crate::hir::module::HirModule;
 use crate::hir::stmt::{HirStmt, HirStmtKind};
 use crate::hir::types::HirType;
@@ -115,14 +115,37 @@ impl<'a> HirBuilder<'a> {
         Ok(id)
     }
 
-    pub fn create_struct(&mut self, name: &str, fields: Vec<crate::hir::items::HirStructField>) -> Result<DefId, HirBuilderError> {
+    pub fn create_struct(&mut self, name: &str, fields: Vec<HirStructField>) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
-        let s = crate::hir::items::HirStruct {
+        let s = HirStruct {
             name: name.to_string(),
             fields,
             id,
         };
         self.module.items.push(HirItem::Struct(s));
+        Ok(id)
+    }
+
+    pub fn create_trait(&mut self, name: &str, items: Vec<HirTraitItem>) -> Result<DefId, HirBuilderError> {
+        let id = DefId(self.module.items.len());
+        let t = HirTrait {
+            name: name.to_string(),
+            id,
+            items,
+        };
+        self.module.items.push(HirItem::Trait(t));
+        Ok(id)
+    }
+
+    pub fn create_impl(&mut self, trait_name: Option<String>, target_name: String, methods: Vec<DefId>) -> Result<DefId, HirBuilderError> {
+        let id = DefId(self.module.items.len());
+        let im = HirImpl {
+            trait_name,
+            target_name,
+            items: methods,
+            id,
+        };
+        self.module.items.push(HirItem::Impl(im));
         Ok(id)
     }
 

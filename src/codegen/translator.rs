@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use cranelift::prelude::*;
-use cranelift_jit::JITModule;
+use cranelift_object::ObjectModule;
 use cranelift_module::{Module, FuncId};
 use crate::hir::module::HirModule;
 use crate::hir::id::{DefId, LocalId, ExprId, StmtId};
@@ -10,7 +10,7 @@ use crate::hir::stmt::HirStmtKind;
 
 pub struct FunctionTranslator<'a> {
     pub(crate) builder: FunctionBuilder<'a>,
-    pub(crate) module: &'a mut JITModule,
+    pub(crate) module: &'a mut ObjectModule,
     pub(crate) fn_ids: &'a HashMap<DefId, FuncId>,
     pub(crate) variables: HashMap<LocalId, Variable>,
     pub(crate) hir: &'a HirModule,
@@ -79,15 +79,28 @@ impl<'a> FunctionTranslator<'a> {
             }
             HirExprKind::Call { callee, args } => {
                 let callee_expr = &self.hir.exprs[callee.0];
-                if let HirExprKind::Symbol { name, .. } = &callee_expr.kind {
-                    let mut arg_vals = Vec::new();
-                    for arg in args {
-                        arg_vals.push(self.translate_expr(*arg));
-                    }
-                    self.resolve_fn_call(name, &arg_vals)
-                } else {
-                    unimplemented!("Indirect calls not supported yet")
+                let mut arg_vals = Vec::new();
+                for arg in args {
+                    arg_vals.push(self.translate_expr(*arg));
                 }
+
+                match &callee_expr.kind {
+                    HirExprKind::Symbol { name, .. } => {
+                        self.resolve_fn_call(name, &arg_vals)
+                    }
+                    HirExprKind::MemberAccess { member, id, .. } => {
+                        if let Some(def_id) = id {
+                            self.call_by_id(*def_id, &arg_vals)
+                        } else {
+                            self.resolve_fn_call(member, &arg_vals)
+                        }
+                    }
+                    _ => unimplemented!("Indirect calls not supported yet")
+                }
+            }
+            HirExprKind::MemberAccess { object, .. } => {
+                self.translate_expr(*object);
+                self.builder.ins().iconst(types::I64, 0)
             }
             HirExprKind::Block { stmts } => {
                 let mut last_val = self.builder.ins().iconst(types::I64, 0);
@@ -108,6 +121,13 @@ impl<'a> FunctionTranslator<'a> {
                 self.builder.ins().iconst(types::I64, 0)
             }
         }
+    }
+
+    fn call_by_id(&mut self, def_id: DefId, args: &[Value]) -> Value {
+        let fn_id = self.fn_ids[&def_id];
+        let local_func = self.module.declare_func_in_func(fn_id, &mut self.builder.func);
+        let call = self.builder.ins().call(local_func, args);
+        self.builder.inst_results(call)[0]
     }
 
     fn resolve_fn_call(&mut self, name: &str, args: &[Value]) -> Value {

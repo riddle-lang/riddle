@@ -13,6 +13,8 @@ statement = _{
     | extern_decl
     | struct_decl
     | enum_decl
+    | trait_decl
+    | impl_decl
     | return_stmt
     | expr_stmt
 }
@@ -37,6 +39,11 @@ enum_variant  = { identifier ~ (enum_tuple | enum_struct)? }
 enum_tuple    = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 enum_struct   = { "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
 
+trait_decl = { "trait" ~ identifier ~ "{" ~ trait_item* ~ "}" }
+trait_item = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
+
+impl_decl = { "impl" ~ identifier ~ ("for" ~ type_expr)? ~ "{" ~ func_decl* ~ "}" }
+
 return_stmt = {"return" ~ expr ~ ";"}
 
 block     = { "{" ~ statement* ~ expr? ~ "}" }
@@ -47,7 +54,8 @@ expr = _{ binary_expr }
 
 binary_expr  = { postfix_expr ~ (op ~ postfix_expr)* }
 
-postfix_expr = { primary_expr ~ (call_suffix | struct_inst)* }
+postfix_expr = { primary_expr ~ (call_suffix | struct_inst | member_access)* }
+member_access = { "." ~ identifier }
 struct_inst = { "{" ~ (struct_inst_field ~ ("," ~ struct_inst_field)*)? ~ ","? ~ "}" }
 struct_inst_field = { identifier ~ ":" ~ expr }
 

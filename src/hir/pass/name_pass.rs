@@ -58,6 +58,7 @@ impl<'a> NamePass<'a> {
                     self.process_expr(gv.value);
                 }
                 HirItem::Enum(_) | HirItem::Struct(_) => {}
+                HirItem::Trait(_) | HirItem::Impl(_) => {}
             }
         }
     }
@@ -138,6 +139,9 @@ impl<'a> NamePass<'a> {
                 for (_, expr_id) in fields_clone {
                     self.process_expr(expr_id);
                 }
+            }
+            HirExprKind::MemberAccess { object, .. } => {
+                self.process_expr(object);
             }
             _ => {}
         }
