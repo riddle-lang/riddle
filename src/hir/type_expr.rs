@@ -8,7 +8,10 @@ pub struct HirTypeExpr {
 
 impl HirTypeExpr {
     pub fn new(kind: HirTypeExprKind) -> Self {
-        Self { kind, curr_ty: None }
+        Self {
+            kind,
+            curr_ty: None,
+        }
     }
 }
 
@@ -16,6 +19,6 @@ impl HirTypeExpr {
 pub enum HirTypeExprKind {
     /// named type like `int`
     Unit,
-    Path(String), 
+    Path(String),
     Func(Vec<TyExprId>, TyExprId),
 }

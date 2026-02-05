@@ -25,7 +25,7 @@ pub enum HirStmtKind {
         init: Option<ExprId>,
         id: LocalId,
     },
-    Return{
+    Return {
         value: Option<ExprId>,
-    }
+    },
 }

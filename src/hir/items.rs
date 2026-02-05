@@ -75,7 +75,14 @@ pub struct HirExternFunc {
 pub struct HirEnum {
     pub name: String,
     pub id: DefId,
-    // TODO: variants
+    pub variants: Vec<HirEnumVariant>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirEnumVariant {
+    Unit(String),
+    Tuple(String, Vec<TyExprId>),
+    Struct(String, Vec<HirStructField>),
 }
 
 #[derive(Debug, Clone)]

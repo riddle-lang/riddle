@@ -1,19 +1,28 @@
-extern crate core;
-
-use crate::frontend::ast::AstNode::Program;
-use crate::hir::lowering::AstLower;
+use codegen::Codegen;
+use frontend::ast::AstNode::Program;
+use hir::lowering::AstLower;
+use hir::pass::name_pass::NamePass;
 use hir::module::HirModule;
 use hir::pass::type_infer::TypeInfer;
-use crate::hir::pass::name_pass::NamePass;
 
-mod hir;
-mod frontend;
 mod codegen;
-
-use crate::codegen::Codegen;
+mod frontend;
+mod hir;
 
 fn main() {
     let code = r#"
+        enum Color {
+            Red,
+            Green,
+            Blue,
+            Rgb(int, int, int),
+            Custom { r: int, g: int, b: int }
+        }
+
+        fun test_enum(c: Color) -> int {
+            return 0;
+        }
+
         struct Foo{
             x: int
         }
@@ -36,6 +45,7 @@ fn main() {
         
         fun main() -> int {
             let x: Foo = Foo { x: 1 };
+            let t = Color::Rgb(1, 2, 3);
             return x.test(1, 2);
         }
     "#;
@@ -44,19 +54,22 @@ fn main() {
 
     let mut module = HirModule::new();
 
-    let mut lower = AstLower::new(&mut module, match &ast {
-        Program(stmts) => stmts,
-        _ => unreachable!(),
-    });
+    let mut lower = AstLower::new(
+        &mut module,
+        match &ast {
+            Program(stmts) => stmts,
+            _ => unreachable!(),
+        },
+    );
 
     lower.lower().unwrap();
-    
+
     let mut name_pass = NamePass::new(&mut module);
     name_pass.run();
-    
+
     let mut type_infer = TypeInfer::new(&mut module);
     type_infer.infer().unwrap();
-    
+
     // println!("{:#?}", module);
 
     let mut codegen = Codegen::new();

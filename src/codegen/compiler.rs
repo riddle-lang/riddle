@@ -1,13 +1,13 @@
-use std::collections::HashMap;
-use cranelift::codegen::ir::UserFuncName;
-use cranelift::prelude::*;
-use cranelift::prelude::isa::CallConv;
-use cranelift_object::{ObjectBuilder, ObjectModule};
-use cranelift_module::{Linkage, Module, FuncId};
-use crate::hir::module::HirModule;
-use crate::hir::id::DefId;
-use crate::hir::items::{HirItem, HirFunc, HirExternFunc};
 use crate::codegen::translator::FunctionTranslator;
+use crate::hir::id::DefId;
+use crate::hir::items::{HirExternFunc, HirFunc, HirItem};
+use crate::hir::module::HirModule;
+use cranelift::codegen::ir::UserFuncName;
+use cranelift::prelude::isa::CallConv;
+use cranelift::prelude::*;
+use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_object::{ObjectBuilder, ObjectModule};
+use std::collections::HashMap;
 
 pub struct Codegen {
     builder_context: FunctionBuilderContext,
@@ -51,7 +51,8 @@ impl Codegen {
                     }
                     sig.returns.push(AbiParam::new(types::I64));
 
-                    let fn_id = self.module
+                    let fn_id = self
+                        .module
                         .declare_function(&func.name, Linkage::Export, &sig)
                         .unwrap();
                     self.fn_ids.insert(func.id, fn_id);
@@ -72,7 +73,8 @@ impl Codegen {
                     }
                     sig.returns.push(AbiParam::new(types::I64));
 
-                    let fn_id = self.module
+                    let fn_id = self
+                        .module
                         .declare_function(&func.name, Linkage::Import, &sig)
                         .unwrap();
                     self.fn_ids.insert(func.id, fn_id);
@@ -108,12 +110,15 @@ impl Codegen {
                 .join(", ")
         };
         let abi = func.abi.as_deref().unwrap_or("default");
-        println!("declare extern {:?} {}({}) -> {}", abi, func.name, params, returns);
+        println!(
+            "declare extern {:?} {}({}) -> {}",
+            abi, func.name, params, returns
+        );
     }
 
     fn compile_func(&mut self, func: &HirFunc, hir: &HirModule) {
         let fn_id = self.fn_ids[&func.id];
-        
+
         let mut sig = self.module.make_signature();
         for _ in &func.param {
             sig.params.push(AbiParam::new(types::I64));
@@ -151,7 +156,9 @@ impl Codegen {
 
         translator.builder.finalize();
         println!("{}", self.ctx.func.display());
-        self.module.define_function(fn_id, &mut self.ctx).expect("Failed to define function");
+        self.module
+            .define_function(fn_id, &mut self.ctx)
+            .expect("Failed to define function");
         self.module.clear_context(&mut self.ctx);
     }
 

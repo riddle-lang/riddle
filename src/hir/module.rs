@@ -1,8 +1,8 @@
 use crate::hir::expr::HirExpr;
 use crate::hir::items::HirItem;
 use crate::hir::stmt::HirStmt;
-use crate::hir::types::HirType;
 use crate::hir::type_expr::HirTypeExpr;
+use crate::hir::types::HirType;
 
 #[derive(Debug)]
 pub struct HirModule {

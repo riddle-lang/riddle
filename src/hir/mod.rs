@@ -1,10 +1,10 @@
-pub mod module;
-pub mod items;
-pub mod types;
-pub mod id;
-pub mod expr;
-pub mod stmt;
 pub mod builder;
-pub mod type_expr;
+pub mod expr;
+pub mod id;
+pub mod items;
 pub mod lowering;
+pub mod module;
 pub mod pass;
+pub mod stmt;
+pub mod type_expr;
+pub mod types;

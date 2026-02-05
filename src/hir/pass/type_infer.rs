@@ -3,7 +3,7 @@ use crate::hir::types::{HirType, InferTy};
 use crate::hir::id::{TyId, ExprId, StmtId, LocalId, TyExprId};
 use crate::hir::expr::{HirExprKind, HirLiteral};
 use crate::hir::stmt::HirStmtKind;
-use crate::hir::items::HirItem;
+use crate::hir::items::{HirItem, HirEnumVariant};
 use crate::hir::type_expr::HirTypeExprKind;
 use std::collections::HashMap;
 
@@ -197,6 +197,7 @@ impl<'a> TypeInfer<'a> {
                     for i in 0..self.module.items.len() {
                         let item_name = match &self.module.items[i] {
                             HirItem::Func(f) => &f.name,
+                            HirItem::ExternFunc(f) => &f.name,
                             HirItem::GlobalVariable(gv) => &gv.name,
                             _ => continue,
                         };
@@ -205,6 +206,68 @@ impl<'a> TypeInfer<'a> {
                             break;
                         }
                     }
+
+                    if found_ty.is_none() && name.contains("::") {
+                        let parts: Vec<&str> = name.split("::").collect();
+                        if parts.len() == 2 {
+                            let enum_name = parts[0];
+                            let variant_name = parts[1];
+                            let mut found_variant = None;
+                            for (i, item) in self.module.items.iter().enumerate() {
+                                if let HirItem::Enum(e) = item {
+                                    if e.name == enum_name {
+                                        for variant in &e.variants {
+                                            match variant {
+                                                HirEnumVariant::Unit(v_name) if v_name == variant_name => {
+                                                    found_variant = Some((i, variant.clone()));
+                                                    break;
+                                                }
+                                                HirEnumVariant::Tuple(v_name, _) if v_name == variant_name => {
+                                                    found_variant = Some((i, variant.clone()));
+                                                    break;
+                                                }
+                                                HirEnumVariant::Struct(v_name, _) if v_name == variant_name => {
+                                                    found_variant = Some((i, variant.clone()));
+                                                    break;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                                if found_variant.is_some() {
+                                    break;
+                                }
+                            }
+
+                            if let Some((enum_idx, variant)) = found_variant {
+                                match variant {
+                                    HirEnumVariant::Unit(_) => {
+                                        found_ty = Some(self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx))));
+                                    }
+                                    HirEnumVariant::Tuple(_, params) => {
+                                        let mut sig = Vec::new();
+                                        let ret_ty = self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx)));
+                                        sig.push(ret_ty);
+                                        for p in params {
+                                            sig.push(self.resolve_type_expr(p)?);
+                                        }
+                                        found_ty = Some(self.get_or_create_type(HirType::Func(sig)));
+                                    }
+                                    HirEnumVariant::Struct(_, fields) => {
+                                        let mut sig = Vec::new();
+                                        let ret_ty = self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx)));
+                                        sig.push(ret_ty);
+                                        for f in fields {
+                                            sig.push(self.resolve_type_expr(f.type_expr)?);
+                                        }
+                                        found_ty = Some(self.get_or_create_type(HirType::Func(sig)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     found_ty.unwrap_or_else(|| self.new_infer_ty())
                 }
             }
@@ -332,20 +395,30 @@ impl<'a> TypeInfer<'a> {
                 } else if name == "bool" {
                     self.get_or_create_type(HirType::Bool)
                 } else {
-                    // 查找结构体
-                    let mut struct_id = None;
+                    // 查找结构体或枚举
+                    let mut def_id = None;
+                    let mut is_enum = false;
                     for (i, item) in self.module.items.iter().enumerate() {
                         match item {
                             HirItem::Struct(s) if s.name == name => {
-                                struct_id = Some(crate::hir::id::DefId(i));
+                                def_id = Some(crate::hir::id::DefId(i));
+                                break;
+                            }
+                            HirItem::Enum(e) if e.name == name => {
+                                def_id = Some(crate::hir::id::DefId(i));
+                                is_enum = true;
                                 break;
                             }
                             _ => {}
                         }
                     }
 
-                    if let Some(def_id) = struct_id {
-                        self.get_or_create_type(HirType::Struct(def_id))
+                    if let Some(id) = def_id {
+                        if is_enum {
+                            self.get_or_create_type(HirType::Enum(id))
+                        } else {
+                            self.get_or_create_type(HirType::Struct(id))
+                        }
                     } else {
                         self.get_or_create_type(HirType::Unknown)
                     }

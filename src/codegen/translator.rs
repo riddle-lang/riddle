@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use cranelift::prelude::*;
-use cranelift_object::ObjectModule;
-use cranelift_module::{Module, FuncId};
-use crate::hir::module::HirModule;
-use crate::hir::id::{DefId, LocalId, ExprId, StmtId};
-use crate::hir::items::HirItem;
 use crate::hir::expr::{HirExprKind, HirLiteral};
+use crate::hir::id::{DefId, ExprId, LocalId, StmtId};
+use crate::hir::items::HirItem;
+use crate::hir::module::HirModule;
 use crate::hir::stmt::HirStmtKind;
+use cranelift::prelude::*;
+use cranelift_module::{FuncId, Module};
+use cranelift_object::ObjectModule;
+use std::collections::HashMap;
 
 pub struct FunctionTranslator<'a> {
     pub(crate) builder: FunctionBuilder<'a>,
@@ -48,12 +48,10 @@ impl<'a> FunctionTranslator<'a> {
     pub fn translate_expr(&mut self, expr_id: ExprId) -> Value {
         let expr = &self.hir.exprs[expr_id.0];
         match &expr.kind {
-            HirExprKind::Literal(lit) => {
-                match lit {
-                    HirLiteral::Int(i) => self.builder.ins().iconst(types::I64, *i),
-                    _ => unimplemented!("Literal type not supported yet"),
-                }
-            }
+            HirExprKind::Literal(lit) => match lit {
+                HirLiteral::Int(i) => self.builder.ins().iconst(types::I64, *i),
+                _ => unimplemented!("Literal type not supported yet"),
+            },
             HirExprKind::BinaryOp { lhs, op, rhs } => {
                 let l = self.translate_expr(*lhs);
                 let r = self.translate_expr(*rhs);
@@ -85,9 +83,7 @@ impl<'a> FunctionTranslator<'a> {
                 }
 
                 match &callee_expr.kind {
-                    HirExprKind::Symbol { name, .. } => {
-                        self.resolve_fn_call(name, &arg_vals)
-                    }
+                    HirExprKind::Symbol { name, .. } => self.resolve_fn_call(name, &arg_vals),
                     HirExprKind::MemberAccess { member, id, .. } => {
                         if let Some(def_id) = id {
                             self.call_by_id(*def_id, &arg_vals)
@@ -95,7 +91,7 @@ impl<'a> FunctionTranslator<'a> {
                             self.resolve_fn_call(member, &arg_vals)
                         }
                     }
-                    _ => unimplemented!("Indirect calls not supported yet")
+                    _ => unimplemented!("Indirect calls not supported yet"),
                 }
             }
             HirExprKind::MemberAccess { object, .. } => {
@@ -125,7 +121,9 @@ impl<'a> FunctionTranslator<'a> {
 
     fn call_by_id(&mut self, def_id: DefId, args: &[Value]) -> Value {
         let fn_id = self.fn_ids[&def_id];
-        let local_func = self.module.declare_func_in_func(fn_id, &mut self.builder.func);
+        let local_func = self
+            .module
+            .declare_func_in_func(fn_id, &mut self.builder.func);
         let call = self.builder.ins().call(local_func, args);
         self.builder.inst_results(call)[0]
     }
@@ -151,10 +149,37 @@ impl<'a> FunctionTranslator<'a> {
         }
 
         if let Some(fn_id) = target_fn_id {
-            let local_func = self.module.declare_func_in_func(fn_id, &mut self.builder.func);
+            let local_func = self
+                .module
+                .declare_func_in_func(fn_id, &mut self.builder.func);
             let call = self.builder.ins().call(local_func, args);
             self.builder.inst_results(call)[0]
         } else {
+            // Check if it is an enum variant
+            if name.contains("::") {
+                let parts: Vec<&str> = name.split("::").collect();
+                if parts.len() == 2 {
+                    let enum_name = parts[0];
+                    let variant_name = parts[1];
+                    for item in &self.hir.items {
+                        if let HirItem::Enum(e) = item {
+                            if e.name == enum_name {
+                                for variant in &e.variants {
+                                    let v_name = match variant {
+                                        crate::hir::items::HirEnumVariant::Unit(n) => n,
+                                        crate::hir::items::HirEnumVariant::Tuple(n, _) => n,
+                                        crate::hir::items::HirEnumVariant::Struct(n, _) => n,
+                                    };
+                                    if v_name == variant_name {
+                                        // For now, return a dummy value 0
+                                        return self.builder.ins().iconst(types::I64, 0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             panic!("Function {} not found", name);
         }
     }

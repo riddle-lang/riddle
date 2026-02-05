@@ -1,7 +1,7 @@
 #[derive(Debug, Clone)]
 pub enum AstNode {
     Program(Vec<AstNode>),
-    
+
     // Statements
     VarDecl {
         name: String,
@@ -63,9 +63,10 @@ pub enum AstNode {
         object: Box<AstNode>,
         member: String,
     },
-    
+
     // Primary Expressions
     Identifier(String),
+    Path(Vec<String>),
     Literal(Literal),
 }
 

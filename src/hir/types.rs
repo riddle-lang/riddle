@@ -13,6 +13,8 @@ pub enum HirType {
     Func(Vec<TyId>),
     /// DefId of the struct
     Struct(crate::hir::id::DefId),
+    /// DefId of the enum
+    Enum(crate::hir::id::DefId),
     /// For bidirectional type checking / inference
     Infer(InferTy),
     Unknown,

@@ -24,7 +24,7 @@ extern_decl  = { "extern" ~ string? ~ extern_item }
 extern_item  = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
 
 var_decl  = { ("var" | "let") ~ identifier ~ (":" ~ type_expr)? ~ ("=" ~ value_expr)? ~ ";" }
-type_expr = { identifier }
+type_expr = { path }
 value_expr = { expr }
 
 func_param = { identifier ~ ":" ~ type_expr }
@@ -36,13 +36,13 @@ struct_field  = { identifier ~ ":" ~ type_expr }
 
 enum_decl     = { "enum" ~ identifier ~ "{" ~ (enum_variant ~ ("," ~ enum_variant)*)? ~ ","? ~ "}" }
 enum_variant  = { identifier ~ (enum_tuple | enum_struct)? }
-enum_tuple    = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+enum_tuple    = { "(" ~ (type_expr ~ ("," ~ type_expr)*)? ~ ")" }
 enum_struct   = { "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
 
 trait_decl = { "trait" ~ identifier ~ "{" ~ trait_item* ~ "}" }
 trait_item = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
 
-impl_decl = { "impl" ~ identifier ~ ("for" ~ type_expr)? ~ "{" ~ func_decl* ~ "}" }
+impl_decl = { "impl" ~ path ~ ("for" ~ type_expr)? ~ "{" ~ func_decl* ~ "}" }
 
 return_stmt = {"return" ~ expr ~ ";"}
 
@@ -64,7 +64,7 @@ call_suffix = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 primary_expr = _{
       block
     | literal
-    | identifier
+    | path
     | "(" ~ expr ~ ")"
 }
 
@@ -80,6 +80,8 @@ string = { "\"" ~ (escape | (!"\"" ~ ANY))* ~ "\"" }
 escape = { "\\" ~ ( "\"" | "\\" | "n" | "r" | "t" | "0" ) }
 
 identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+path = { identifier ~ ("::" ~ identifier)* }
 
 op = @{ op_char+ }
 op_char = { "+" | "-" | "*" | "/" | "!" | "@" | "%" | "^" | "&" | "=" | "~" | "<" | ">" }

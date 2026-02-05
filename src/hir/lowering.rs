@@ -1,8 +1,8 @@
-use crate::frontend::ast::{AstNode, Literal};
+use crate::frontend::ast::{AstNode, EnumVariant, Literal};
 use crate::hir::builder::HirBuilder;
 use crate::hir::expr::{HirExpr, HirExprKind, HirLiteral};
 use crate::hir::id::TyExprId;
-use crate::hir::items::{HirFuncParam, HirStructField, HirTraitItem};
+use crate::hir::items::{HirEnumVariant, HirFuncParam, HirStructField, HirTraitItem};
 use crate::hir::module::HirModule;
 use crate::hir::type_expr::{HirTypeExpr, HirTypeExprKind};
 
@@ -102,9 +102,39 @@ impl<'a> AstLower<'a> {
                         .create_struct(name, hir_fields)
                         .map_err(|_| "Failed to create struct".to_string())?;
                 }
-                AstNode::EnumDecl { name, .. } => {
+                AstNode::EnumDecl { name, variants } => {
+                    let mut hir_variants = Vec::new();
+                    for variant in variants {
+                        match variant {
+                            EnumVariant::Unit(name) => {
+                                hir_variants.push(HirEnumVariant::Unit(name.clone()));
+                            }
+                            EnumVariant::Tuple(name, types) => {
+                                let mut hir_types = Vec::new();
+                                for ty in types {
+                                    let type_expr = self.lower_type_expr(&Box::new(ty.clone()))?;
+                                    let type_expr_id = self.builder.create_type_expr(type_expr);
+                                    hir_types.push(type_expr_id);
+                                }
+                                hir_variants.push(HirEnumVariant::Tuple(name.clone(), hir_types));
+                            }
+                            EnumVariant::Struct(name, fields) => {
+                                let mut hir_fields = Vec::new();
+                                for field in fields {
+                                    let type_expr = self.lower_type_expr(&field.type_expr)?;
+                                    let type_expr_id = self.builder.create_type_expr(type_expr);
+                                    hir_fields.push(HirStructField {
+                                        name: field.name.clone(),
+                                        type_expr: type_expr_id,
+                                    });
+                                }
+                                hir_variants
+                                    .push(HirEnumVariant::Struct(name.clone(), hir_fields));
+                            }
+                        }
+                    }
                     self.builder
-                        .create_enum(name)
+                        .create_enum(name, hir_variants)
                         .map_err(|_| "Failed to create enum".to_string())?;
                 }
                 AstNode::TraitDecl { name, items } => {
@@ -126,19 +156,35 @@ impl<'a> AstLower<'a> {
                         let ret_te = if let Some(ret) = &item.return_type {
                             self.lower_type_expr(ret)?
                         } else {
-                            crate::hir::type_expr::HirTypeExpr::new(crate::hir::type_expr::HirTypeExprKind::Unit)
+                            crate::hir::type_expr::HirTypeExpr::new(
+                                crate::hir::type_expr::HirTypeExprKind::Unit,
+                            )
                         };
                         let ret = self.builder.create_type_expr(ret_te);
-                        hir_items.push(HirTraitItem { name: item.name.clone(), params, ret });
+                        hir_items.push(HirTraitItem {
+                            name: item.name.clone(),
+                            params,
+                            ret,
+                        });
                     }
                     self.builder
                         .create_trait(name, hir_items)
                         .map_err(|_| "Failed to create trait".to_string())?;
                 }
-                AstNode::ImplDecl { trait_name, target_name, items } => {
+                AstNode::ImplDecl {
+                    trait_name,
+                    target_name,
+                    items,
+                } => {
                     let mut methods = Vec::new();
                     for it in items {
-                        if let AstNode::FuncDecl { name, params, return_type, body } = it {
+                        if let AstNode::FuncDecl {
+                            name,
+                            params,
+                            return_type,
+                            body,
+                        } = it
+                        {
                             let mut p = Vec::new();
                             for param in params {
                                 let type_expr = self.lower_type_expr(&param.type_expr)?;
@@ -221,6 +267,7 @@ impl<'a> AstLower<'a> {
     fn lower_type_expr(&mut self, type_expr: &Box<AstNode>) -> Result<HirTypeExpr, String> {
         match type_expr.as_ref() {
             AstNode::Identifier(name) => Ok(HirTypeExpr::new(HirTypeExprKind::Path(name.clone()))),
+            AstNode::Path(parts) => Ok(HirTypeExpr::new(HirTypeExprKind::Path(parts.join("::")))),
             _ => Err(format!("Unexpected node in type expr: {:?}", type_expr)),
         }
     }
@@ -312,9 +359,15 @@ impl<'a> AstLower<'a> {
         match expr {
             AstNode::Literal(lit) => match lit {
                 Literal::Int(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Int(*val)))),
-                Literal::Bool(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Bool(*val)))),
-                Literal::Float(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Float(*val)))),
-                Literal::Str(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Str(val.clone())))),
+                Literal::Bool(val) => {
+                    Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Bool(*val))))
+                }
+                Literal::Float(val) => {
+                    Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Float(*val))))
+                }
+                Literal::Str(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Str(
+                    val.clone(),
+                )))),
             },
             AstNode::BinaryExpr { lhs, op, rhs } => {
                 let lhs = self.lower_expr(lhs)?;
@@ -331,6 +384,13 @@ impl<'a> AstLower<'a> {
                 name: name.clone(),
                 id: None,
             })),
+            AstNode::Path(parts) => {
+                let name = parts.join("::");
+                Ok(HirExpr::new(HirExprKind::Symbol {
+                    name,
+                    id: None,
+                }))
+            }
             AstNode::Call { func, args } => {
                 let callee = self.lower_expr(func)?;
                 let callee = self.builder.create_expr(callee);
