@@ -52,7 +52,7 @@ impl<'a> TypeInfer<'a> {
                     for param in &func.param {
                         sig.push(self.resolve_type_expr(param.type_expr)?);
                     }
-                    let ty = self.get_or_create_type(HirType::Func(sig));
+                    let ty = self.get_or_create_type(HirType::Func(sig, false));
                     self.item_types.insert(i, ty);
                 }
                 HirItem::ExternFunc(func) => {
@@ -61,7 +61,7 @@ impl<'a> TypeInfer<'a> {
                     for param in &func.param {
                         sig.push(self.resolve_type_expr(param.type_expr)?);
                     }
-                    let ty = self.get_or_create_type(HirType::Func(sig));
+                    let ty = self.get_or_create_type(HirType::Func(sig, func.is_variadic));
                     self.item_types.insert(i, ty);
                 }
                 HirItem::GlobalVariable(gv) => {
@@ -183,10 +183,13 @@ impl<'a> TypeInfer<'a> {
         let expr = self.module.exprs[expr_id.0].clone();
         let ty = match expr.kind {
             HirExprKind::Literal(lit) => match lit {
-                HirLiteral::Int(_) => self.get_or_create_type(HirType::Int(32)),
+                HirLiteral::Int(_) => self.get_or_create_type(HirType::Int(64)),
                 HirLiteral::Float(_) => self.get_or_create_type(HirType::Float), 
                 HirLiteral::Bool(_) => self.get_or_create_type(HirType::Bool),
-                HirLiteral::Str(_) => self.get_or_create_type(HirType::Unknown),
+                HirLiteral::Str(_) => {
+                    let str_ty = self.get_or_create_type(HirType::Str);
+                    self.get_or_create_type(HirType::Ref(str_ty))
+                }
             },
             HirExprKind::BinaryOp { lhs, op, rhs } => {
                 let lhs_ty = self.infer_expr(lhs)?;
@@ -283,7 +286,7 @@ impl<'a> TypeInfer<'a> {
                                         for p in params {
                                             sig.push(self.resolve_type_expr(p)?);
                                         }
-                                        sig_to_inst = Some(self.get_or_create_type(HirType::Func(sig)));
+                                        sig_to_inst = Some(self.get_or_create_type(HirType::Func(sig, false)));
                                     }
                                     HirEnumVariant::Struct(_, fields) => {
                                         let mut sig = Vec::new();
@@ -292,7 +295,7 @@ impl<'a> TypeInfer<'a> {
                                         for f in fields {
                                             sig.push(self.resolve_type_expr(f.type_expr)?);
                                         }
-                                        sig_to_inst = Some(self.get_or_create_type(HirType::Func(sig)));
+                                        sig_to_inst = Some(self.get_or_create_type(HirType::Func(sig, false)));
                                     }
                                 }
                                 self.type_params = old_params;
@@ -319,7 +322,7 @@ impl<'a> TypeInfer<'a> {
                 let ret_ty = self.new_infer_ty();
                 let mut func_sig = vec![ret_ty];
                 func_sig.extend(arg_tys);
-                let func_ty = self.get_or_create_type(HirType::Func(func_sig));
+                let func_ty = self.get_or_create_type(HirType::Func(func_sig, false));
                 
                 self.unify(callee_ty, func_ty)?;
                 ret_ty
@@ -473,9 +476,11 @@ impl<'a> TypeInfer<'a> {
                     return Ok(*ty);
                 }
                 if name == "int" {
-                    self.get_or_create_type(HirType::Int(32))
+                    self.get_or_create_type(HirType::Int(64))
                 } else if name == "bool" {
                     self.get_or_create_type(HirType::Bool)
+                } else if name == "str" {
+                    self.get_or_create_type(HirType::Str)
                 } else {
                     // 查找结构体或枚举
                     let mut def_id = None;
@@ -545,7 +550,11 @@ impl<'a> TypeInfer<'a> {
                 for p in params {
                     sig.push(self.resolve_type_expr(p)?);
                 }
-                self.get_or_create_type(HirType::Func(sig))
+                self.get_or_create_type(HirType::Func(sig, false))
+            }
+            HirTypeExprKind::Ref(inner) => {
+                let inner_ty = self.resolve_type_expr(inner)?;
+                self.get_or_create_type(HirType::Ref(inner_ty))
             }
         };
         self.module.type_exprs[ty_expr_id.0].curr_ty = Some(ty_id);
@@ -589,12 +598,19 @@ impl<'a> TypeInfer<'a> {
                 self.constraints.insert(id, t1);
                 Ok(())
             }
-            (HirType::Func(f1), HirType::Func(f2)) => {
-                if f1.len() != f2.len() {
-                    return Err(format!("Arity mismatch: {} vs {}", f1.len(), f2.len()));
-                }
-                for (a, b) in f1.into_iter().zip(f2.into_iter()) {
-                    self.unify(a, b)?;
+            (HirType::Func(f1, v1), HirType::Func(f2, v2)) => {
+                if v1 || v2 {
+                    let min_len = if f1.len() < f2.len() { f1.len() } else { f2.len() };
+                    for i in 0..min_len {
+                        self.unify(f1[i], f2[i])?;
+                    }
+                } else {
+                    if f1.len() != f2.len() {
+                        return Err(format!("Arity mismatch: {} vs {}", f1.len(), f2.len()));
+                    }
+                    for (a, b) in f1.into_iter().zip(f2.into_iter()) {
+                        self.unify(a, b)?;
+                    }
                 }
                 Ok(())
             }
@@ -615,6 +631,9 @@ impl<'a> TypeInfer<'a> {
                     self.unify(a, b)?;
                 }
                 Ok(())
+            }
+            (HirType::Ref(inner1), HirType::Ref(inner2)) => {
+                self.unify(inner1, inner2)
             }
             (a, b) if a == b => Ok(()),
             (a, b) => Err(format!("Cannot unify {:?} and {:?}", a, b)),
@@ -671,12 +690,16 @@ impl<'a> TypeInfer<'a> {
                     ty_id
                 }
             }
-            HirType::Func(sig) => {
+            HirType::Func(sig, is_variadic) => {
                 let mut new_sig = Vec::new();
                 for t in sig {
                     new_sig.push(self.substitute(t, mapping));
                 }
-                self.get_or_create_type(HirType::Func(new_sig))
+                self.get_or_create_type(HirType::Func(new_sig, is_variadic))
+            }
+            HirType::Ref(inner) => {
+                let new_inner = self.substitute(inner, mapping);
+                self.get_or_create_type(HirType::Ref(new_inner))
             }
             HirType::Struct(id, args) => {
                 let mut new_args = Vec::new();

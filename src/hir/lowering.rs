@@ -283,7 +283,7 @@ impl<'a> AstLower<'a> {
         let ret = self.builder.create_type_expr(ret);
 
         self.builder
-            .create_extern_func(abi, &func.name, ret, p)
+            .create_extern_func(abi, &func.name, ret, p, func.is_variadic)
             .map_err(|_| "Failed to create extern function".to_string())?;
         Ok(())
     }
@@ -304,6 +304,11 @@ impl<'a> AstLower<'a> {
                     }
                     Ok(HirTypeExpr::new(HirTypeExprKind::Generic(name, hir_args)))
                 }
+            }
+            AstNode::RefType(inner) => {
+                let inner_te = self.lower_type_expr(inner)?;
+                let inner_te_id = self.builder.create_type_expr(inner_te);
+                Ok(HirTypeExpr::new(HirTypeExprKind::Ref(inner_te_id)))
             }
             _ => Err(format!("Unexpected node in type expr: {:?}", type_expr)),
         }

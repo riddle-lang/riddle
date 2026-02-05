@@ -21,10 +21,13 @@ statement = _{
 
 extern_block = { "extern" ~ string? ~ "{" ~ extern_item* ~ "}" }
 extern_decl  = { "extern" ~ string? ~ extern_item }
-extern_item  = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
+extern_item  = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ("," ~ variadic_marker)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
+variadic_marker = { "..." }
 
 var_decl  = { ("var" | "let") ~ identifier ~ (":" ~ type_expr)? ~ ("=" ~ value_expr)? ~ ";" }
-type_expr = { path ~ generic_args? }
+type_expr = { reference_type | path_type }
+reference_type = { "&" ~ type_expr }
+path_type = { path ~ generic_args? }
 generic_args = { "<" ~ type_expr ~ ("," ~ type_expr)* ~ ">" }
 generic_params = { "<" ~ identifier ~ ("," ~ identifier)* ~ ">" }
 value_expr = { expr }

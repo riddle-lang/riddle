@@ -74,6 +74,7 @@ pub struct HirExternFunc {
     pub param: Vec<HirFuncParam>,
     pub ret: TyExprId,
     pub id: DefId,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -1,8 +1,8 @@
 use codegen::Codegen;
 use frontend::ast::AstNode::Program;
 use hir::lowering::AstLower;
-use hir::pass::name_pass::NamePass;
 use hir::module::HirModule;
+use hir::pass::name_pass::NamePass;
 use hir::pass::type_infer::TypeInfer;
 
 mod codegen;
@@ -11,17 +11,13 @@ mod hir;
 
 fn main() {
     let code = r#"
-        struct Box<T> {
-            inner: T
-        }
-
-        fun get_inner<T>(b: Box<T>) -> T {
-            return b.inner;
+        extern "C" {
+            fun printf(fmt: &str, ...) -> int;
         }
 
         fun main() -> int {
-            let b = Box { inner: 1 };
-            return get_inner(b);
+            printf("hello %d", 42);
+            return printf("hello world");
         }
     "#;
 

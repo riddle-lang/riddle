@@ -76,6 +76,7 @@ pub enum AstNode {
         path: Vec<String>,
         args: Vec<AstNode>,
     },
+    RefType(Box<AstNode>),
     Literal(Literal),
 }
 
@@ -90,6 +91,7 @@ pub struct ExternFunc {
     pub name: String,
     pub params: Vec<FuncParam>,
     pub return_type: Option<Box<AstNode>>,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, Clone)]

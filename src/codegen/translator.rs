@@ -4,7 +4,7 @@ use crate::hir::items::HirItem;
 use crate::hir::module::HirModule;
 use crate::hir::stmt::HirStmtKind;
 use cranelift::prelude::*;
-use cranelift_module::{FuncId, Module};
+use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use cranelift_object::ObjectModule;
 use std::collections::HashMap;
 
@@ -50,6 +50,22 @@ impl<'a> FunctionTranslator<'a> {
         match &expr.kind {
             HirExprKind::Literal(lit) => match lit {
                 HirLiteral::Int(i) => self.builder.ins().iconst(types::I64, *i),
+                HirLiteral::Bool(b) => self.builder.ins().iconst(types::I64, if *b { 1 } else { 0 }),
+                HirLiteral::Str(s) => {
+                    let mut data_ctx = DataDescription::new();
+                    let mut s_with_null = s.clone();
+                    s_with_null.push('\0');
+                    data_ctx.define(s_with_null.into_bytes().into_boxed_slice());
+                    let data_id = self.module.declare_data(
+                        &format!("str_{}", expr_id.0),
+                        Linkage::Local,
+                        false,
+                        false
+                    ).unwrap();
+                    self.module.define_data(data_id, &data_ctx).unwrap();
+                    let data_ref = self.module.declare_data_in_func(data_id, &mut self.builder.func);
+                    self.builder.ins().symbol_value(types::I64, data_ref)
+                }
                 _ => unimplemented!("Literal type not supported yet"),
             },
             HirExprKind::BinaryOp { lhs, op, rhs } => {
@@ -120,6 +136,13 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn call_by_id(&mut self, def_id: DefId, args: &[Value]) -> Value {
+        let item = &self.hir.items[def_id.0];
+        if let HirItem::ExternFunc(f) = item {
+            if f.is_variadic {
+                return self.emit_variadic_call(def_id, args);
+            }
+        }
+
         let fn_id = self.fn_ids[&def_id];
         let local_func = self
             .module
@@ -128,19 +151,41 @@ impl<'a> FunctionTranslator<'a> {
         self.builder.inst_results(call)[0]
     }
 
+    // Handling variable length parameter functions
+    fn emit_variadic_call(&mut self, def_id: DefId, args: &[Value]) -> Value {
+        let fn_id = self.fn_ids[&def_id];
+        let mut sig = self.module.make_signature();
+
+        let default_cc = self.module.isa().default_call_conv();
+        sig.call_conv = default_cc;
+
+        for _ in 0..args.len() {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let sig_ref = self.builder.import_signature(sig);
+        let local_func = self
+            .module
+            .declare_func_in_func(fn_id, &mut self.builder.func);
+        let func_ptr = self.builder.ins().func_addr(types::I64, local_func);
+        let call = self.builder.ins().call_indirect(sig_ref, func_ptr, args);
+        self.builder.inst_results(call)[0]
+    }
+
     fn resolve_fn_call(&mut self, name: &str, args: &[Value]) -> Value {
-        let mut target_fn_id = None;
-        for item in &self.hir.items {
+        let mut target_def_id = None;
+        for (i, item) in self.hir.items.iter().enumerate() {
             match item {
                 HirItem::Func(f) => {
                     if f.name == name {
-                        target_fn_id = Some(self.fn_ids[&f.id]);
+                        target_def_id = Some(DefId(i));
                         break;
                     }
                 }
                 HirItem::ExternFunc(f) => {
                     if f.name == name {
-                        target_fn_id = Some(self.fn_ids[&f.id]);
+                        target_def_id = Some(DefId(i));
                         break;
                     }
                 }
@@ -148,12 +193,8 @@ impl<'a> FunctionTranslator<'a> {
             }
         }
 
-        if let Some(fn_id) = target_fn_id {
-            let local_func = self
-                .module
-                .declare_func_in_func(fn_id, &mut self.builder.func);
-            let call = self.builder.ins().call(local_func, args);
-            self.builder.inst_results(call)[0]
+        if let Some(def_id) = target_def_id {
+            self.call_by_id(def_id, args)
         } else {
             // Check if it is an enum variant
             if name.contains("::") {

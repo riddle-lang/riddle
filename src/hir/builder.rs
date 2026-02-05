@@ -94,6 +94,7 @@ impl<'a> HirBuilder<'a> {
         name: &str,
         ret: TyExprId,
         param: Vec<HirFuncParam>,
+        is_variadic: bool,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let func = HirExternFunc {
@@ -102,6 +103,7 @@ impl<'a> HirBuilder<'a> {
             param,
             ret,
             id,
+            is_variadic,
         };
         self.module.items.push(HirItem::ExternFunc(func));
         Ok(id)

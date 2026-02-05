@@ -19,6 +19,7 @@ fn parse_extern_item(pair: Pair<Rule>) -> ExternFunc {
     let name = inner.next().unwrap().as_str().to_string();
     let mut params = Vec::new();
     let mut return_type = None;
+    let mut is_variadic = false;
     for p in inner {
         match p.as_rule() {
             Rule::func_param => {
@@ -30,6 +31,9 @@ fn parse_extern_item(pair: Pair<Rule>) -> ExternFunc {
                     type_expr: p_type,
                 });
             }
+            Rule::variadic_marker => {
+                is_variadic = true;
+            }
             Rule::type_expr => {
                 return_type = Some(Box::new(parse_pair(p)))
             }
@@ -40,6 +44,7 @@ fn parse_extern_item(pair: Pair<Rule>) -> ExternFunc {
         name,
         params,
         return_type,
+        is_variadic,
     }
 }
 
@@ -416,7 +421,12 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                 AstNode::Path(parts)
             }
         }
-        Rule::type_expr => {
+        Rule::type_expr => parse_pair(pair.into_inner().next().unwrap()),
+        Rule::reference_type => {
+            let inner = pair.into_inner().next().unwrap();
+            AstNode::RefType(Box::new(parse_pair(inner)))
+        }
+        Rule::path_type => {
             let mut inner = pair.into_inner();
             let path_pair = inner.next().unwrap();
             let parts: Vec<String> = path_pair

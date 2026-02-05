@@ -9,8 +9,10 @@ pub enum HirType {
     Double,
     Bool,
     Unit,
-    /// ret, param*
-    Func(Vec<TyId>),
+    Str,
+    Ref(TyId),
+    /// ret, param*, is_variadic
+    Func(Vec<TyId>, bool),
     /// DefId of the struct, Generic arguments
     Struct(crate::hir::id::DefId, Vec<TyId>),
     /// DefId of the enum, Generic arguments

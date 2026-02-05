@@ -3,7 +3,6 @@ use crate::hir::id::DefId;
 use crate::hir::items::{HirExternFunc, HirFunc, HirItem};
 use crate::hir::module::HirModule;
 use cranelift::codegen::ir::UserFuncName;
-use cranelift::prelude::isa::CallConv;
 use cranelift::prelude::*;
 use cranelift_module::{FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -59,14 +58,8 @@ impl Codegen {
                 }
                 HirItem::ExternFunc(func) => {
                     let mut sig = self.module.make_signature();
-                    // 处理 ABI
-                    if let Some(abi) = &func.abi {
-                        match abi.as_str() {
-                            "C" => sig.call_conv = CallConv::SystemV,
-                            "C++" => sig.call_conv = CallConv::SystemV,
-                            _ => {}
-                        }
-                    }
+                    let default_cc = self.module.isa().default_call_conv();
+                    sig.call_conv = default_cc;
 
                     for _ in &func.param {
                         sig.params.push(AbiParam::new(types::I64));
@@ -94,12 +87,19 @@ impl Codegen {
     }
 
     fn print_extern_decl(&self, func: &HirExternFunc, sig: &Signature) {
-        let params = sig
+        let mut params = sig
             .params
             .iter()
             .map(|p| format!("{}", p.value_type))
             .collect::<Vec<_>>()
             .join(", ");
+        if func.is_variadic {
+            if params.is_empty() {
+                params = "...".to_string();
+            } else {
+                params.push_str(", ...");
+            }
+        }
         let returns = if sig.returns.is_empty() {
             "void".to_string()
         } else {
@@ -131,7 +131,7 @@ impl Codegen {
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
         builder.seal_block(entry_block);
-        let pretty = format!("{}#{}", func.name, fn_id.as_u32());
+        let pretty = func.name.clone();
         builder.func.name = UserFuncName::testcase(pretty);
 
         let mut translator = FunctionTranslator {

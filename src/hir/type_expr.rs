@@ -22,4 +22,5 @@ pub enum HirTypeExprKind {
     Path(String),
     Generic(String, Vec<TyExprId>),
     Func(Vec<TyExprId>, TyExprId),
+    Ref(TyExprId),
 }
