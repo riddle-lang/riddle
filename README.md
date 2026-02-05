@@ -1,54 +1,67 @@
 # Riddle
 
-Riddle 是一个使用 Rust 编写的编程语言基础设施项目，旨在为 Riddle 语言提供解析、高级中间表示（HIR）构建以及后续的编译或解释支持。
+<p align="center">
+  <img src="resources/logo.svg" alt="Riddle logo" width="160" />
+</p>
 
-## 特性
+> 一个用 Rust 编写的实验性语言项目，聚焦语法设计、类型系统与可执行生成的探索。
 
-- **基于 Pest 的语法解析**：使用 [Pest](https://pest.rs/) 解析器生成器定义了 Riddle 语言的语法。
-- **高级中间表示 (HIR)**：提供了一套结构化的 HIR 体系，用于表示模块、函数、变量、类型和表达式。
-- **灵活的 HIR 构建器**：包含 `HirBuilder` 模式，方便以编程方式构建和操作 HIR。
-- **强类型系统支持**：HIR 层级内置了对基本类型、复合类型（结构体、枚举）的支持。
+## ✨ 特性
 
-## 项目结构
+- Rust 风格语法：函数、结构体、枚举、泛型、trait 与 impl
+- 语法与语义清晰：显式类型、基本字面量、块表达式
+- 小而美的语言内核，方便扩展与实验
 
-- `src/riddle.pest`: Riddle 语言的语法定义。
-- `src/hir/`: 高级中间表示的核心实现。
-  - `builder.rs`: 用于构建 HIR 的辅助工具。
-  - `module.rs`: 顶层模块结构，容纳函数和类型定义。
-  - `types.rs` & `type_expr.rs`: 类型系统及类型表达式定义。
-  - `expr.rs` & `stmt.rs`: 表达式与语句的 HIR 定义。
-- `src/main.rs`: 项目入口，包含 HIR 构建的演示示例。
+## 🚀 快速开始
 
-## 语法概览
+### 依赖
 
-Riddle 语言支持以下特性：
+- Rust（stable）
+- Cargo
+- Rust crates（详见 `Cargo.toml`）：
+  - `pest = "2.8.5"`
+  - `pest_derive = "2.8.5"`
+  - `cranelift = "0.116.1"`
+  - `cranelift-module = "0.116.1"`
+  - `cranelift-object = "0.116.1"`
+  - `cranelift-native = "0.116.1"`
+  - `cranelift-frontend = "0.116.1"`
+  - `target-lexicon = "0.12"`
 
-- **变量声明**：`var x: int = 42;`
-- **函数定义**：
-  ```rust
-  fun add(a: int, b: int): int {
-      a + b
-  }
-  ```
-- **结构体与枚举**：支持强类型的复合数据结构。
-- **块表达式**：支持类 Rust 的块作用域和返回值。
+### 运行示例
+```bash
+cargo run
+```
+## 🧩 语言一瞥
+```riddle
+extern "C" {
+    fun printf(fmt: &str, ...) -> int;
+}
 
-## 快速开始
+fun main() -> int {
+    let answer = 42;
+    printf("hello %d", answer);
+    return 0;
+}
+```
+## 📦 项目结构
 
-确保你已经安装了 [Rust](https://www.rust-lang.org/)。
+- `src/frontend` — 语法与 AST
+- `src/hir` — 中间表示与类型推断
+- `src/codegen` — 代码生成（基于 Cranelift）
+- `resources/logo.svg` — 项目标识
 
-1. 克隆或下载本项目。
-2. 运行示例程序：
-   ```bash
-   cargo run
-   ```
+## 🗺️ 路线图
 
-该程序将演示如何使用 `HirBuilder` 创建一个模块、定义一个函数并添加局部变量，最后打印出生成的 HIR 结构。
+- [ ] 完善错误提示与诊断
+- [ ] 更多标准库/运行时支持
+- [ ] 更丰富的表达式与模式匹配
+- [ ] 测试与基准体系
 
-## 开发状态
+## 🤝 贡献
 
-本项目目前处于早期开发阶段，主要专注于 HIR 架构的搭建和语法解析的完善。
+欢迎 PR 与 Issue。提交前建议格式化代码并附上简要说明。
 
-## 许可证
+## 📄 License
 
-[Apache License 2.0](LICENSE)
+Apache-2.0

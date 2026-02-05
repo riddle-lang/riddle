@@ -1,0 +1,17 @@
+<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg" fill="none">
+ <defs>
+  <linearGradient y2="1.05556" x2="1.05556" y1="-0.05556" x1="-0.05556" id="riddleGradient">
+   <stop stop-color="#005670"/>
+   <stop stop-color="#00A1D6" offset="1"/>
+  </linearGradient>
+ </defs>
+ <!-- 背景圆形 -->
+ <!-- "R" 字母主体 -->
+ <!-- 谜题元素：短横线表示钥匙或细节 -->
+ <g>
+  <title>Layer 1</title>
+  <path transform="rotate(152 135 128)" id="svg_3" stroke-linecap="round" stroke-width="16" stroke="url(#riddleGradient)" d="m140,118l-10,0m10,20l-10,0"/>
+  <circle id="svg_1" opacity="0.2" fill="url(#riddleGradient)" r="90" cy="100" cx="100"/>
+  <path id="svg_2" stroke-linejoin="round" stroke-linecap="round" stroke-width="16" stroke="url(#riddleGradient)" d="m70,50l0,100m0,-100c0,0 60,0 60,30c0,30 -60,30 -60,30m40,0l20,40"/>
+ </g>
+</svg>
