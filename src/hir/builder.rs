@@ -71,12 +71,14 @@ impl<'a> HirBuilder<'a> {
     pub fn create_func(
         &mut self,
         name: &str,
+        generic_params: Vec<String>,
         ret: TyExprId,
         param: Vec<HirFuncParam>,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let func = HirFunc {
             name: name.to_string(),
+            generic_params,
             param,
             ret,
             id,
@@ -124,11 +126,13 @@ impl<'a> HirBuilder<'a> {
     pub fn create_enum(
         &mut self,
         name: &str,
+        generic_params: Vec<String>,
         variants: Vec<HirEnumVariant>,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let e = HirEnum {
             name: name.to_string(),
+            generic_params,
             id,
             variants,
         };
@@ -139,11 +143,13 @@ impl<'a> HirBuilder<'a> {
     pub fn create_struct(
         &mut self,
         name: &str,
+        generic_params: Vec<String>,
         fields: Vec<HirStructField>,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let s = HirStruct {
             name: name.to_string(),
+            generic_params,
             fields,
             id,
         };
@@ -154,11 +160,13 @@ impl<'a> HirBuilder<'a> {
     pub fn create_trait(
         &mut self,
         name: &str,
+        generic_params: Vec<String>,
         items: Vec<HirTraitItem>,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let t = HirTrait {
             name: name.to_string(),
+            generic_params,
             id,
             items,
         };
@@ -168,14 +176,16 @@ impl<'a> HirBuilder<'a> {
 
     pub fn create_impl(
         &mut self,
-        trait_name: Option<String>,
-        target_name: String,
+        generic_params: Vec<String>,
+        trait_type: Option<TyExprId>,
+        target_type: TyExprId,
         methods: Vec<DefId>,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let im = HirImpl {
-            trait_name,
-            target_name,
+            generic_params,
+            trait_type,
+            target_type,
             items: methods,
             id,
         };

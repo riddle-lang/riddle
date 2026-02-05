@@ -11,42 +11,17 @@ mod hir;
 
 fn main() {
     let code = r#"
-        enum Color {
-            Red,
-            Green,
-            Blue,
-            Rgb(int, int, int),
-            Custom { r: int, g: int, b: int }
+        struct Box<T> {
+            inner: T
         }
 
-        fun test_enum(c: Color) -> int {
-            return 0;
+        fun get_inner<T>(b: Box<T>) -> T {
+            return b.inner;
         }
 
-        struct Foo{
-            x: int
-        }
-
-        extern "C" fun test1(x: int, y: int) -> int;
-
-        trait TestTrait {
-            fun test(x: int, y: int) -> int;
-        }
-
-        impl TestTrait for Foo {
-            fun test(x: int, y: int) -> int {
-                return (x * y) - (x / y);
-            }
-        }
-
-        fun test(x: int, y: int) -> int {
-            return (x * y) - (x / y);
-        }
-        
         fun main() -> int {
-            let x: Foo = Foo { x: 1 };
-            let t = Color::Rgb(1, 2, 3);
-            return x.test(1, 2);
+            let b = Box { inner: 1 };
+            return get_inner(b);
         }
     "#;
 

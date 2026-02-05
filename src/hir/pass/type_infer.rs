@@ -9,10 +9,12 @@ use std::collections::HashMap;
 
 pub struct TypeInfer<'a> {
     module: &'a mut HirModule,
-    /// Mapping from InferTy::Id to the actual type
+    /// Mapping from InferTy::ID to the actual type
     constraints: HashMap<usize, TyId>,
     /// Mapping from LocalId to its TyId
     locals: HashMap<LocalId, TyId>,
+    /// Mapping from type parameter name to its TyId
+    type_params: HashMap<String, TyId>,
     /// Mapping from Item index to its TyId
     item_types: HashMap<usize, TyId>,
     current_ret_ty: Option<TyId>,
@@ -25,6 +27,7 @@ impl<'a> TypeInfer<'a> {
             module,
             constraints: HashMap::new(),
             locals: HashMap::new(),
+            type_params: HashMap::new(),
             item_types: HashMap::new(),
             current_ret_ty: None,
             next_infer_id: 0,
@@ -39,6 +42,11 @@ impl<'a> TypeInfer<'a> {
             let item = self.module.items[i].clone();
             match item {
                 HirItem::Func(func) => {
+                    self.type_params.clear();
+                    for tp in &func.generic_params {
+                        let ty = self.get_or_create_type(HirType::GenericParam(tp.clone()));
+                        self.type_params.insert(tp.clone(), ty);
+                    }
                     let ret_ty = self.resolve_type_expr(func.ret)?;
                     let mut sig = vec![ret_ty];
                     for param in &func.param {
@@ -106,7 +114,13 @@ impl<'a> TypeInfer<'a> {
 
     fn infer_function(&mut self, func: crate::hir::items::HirFunc) -> Result<(), String> {
         self.locals.clear();
-        
+        self.type_params.clear();
+
+        for tp in &func.generic_params {
+            let ty = self.get_or_create_type(HirType::GenericParam(tp.clone()));
+            self.type_params.insert(tp.clone(), ty);
+        }
+
         // Resolve parameter types
         for param in &func.param {
             let ty = self.resolve_type_expr(param.type_expr)?;
@@ -194,16 +208,19 @@ impl<'a> TypeInfer<'a> {
                 } else {
                     // Try to find in global items
                     let mut found_ty = None;
-                    for i in 0..self.module.items.len() {
-                        let item_name = match &self.module.items[i] {
-                            HirItem::Func(f) => &f.name,
-                            HirItem::ExternFunc(f) => &f.name,
-                            HirItem::GlobalVariable(gv) => &gv.name,
-                            _ => continue,
-                        };
-                        if item_name == &name {
-                            found_ty = self.item_types.get(&i).copied();
-                            break;
+                    if found_ty.is_none() {
+                        for i in 0..self.module.items.len() {
+                            let (item_name, item_generic_params) = match &self.module.items[i] {
+                                HirItem::Func(f) => (f.name.clone(), f.generic_params.clone()),
+                                HirItem::ExternFunc(f) => (f.name.clone(), vec![]),
+                                HirItem::GlobalVariable(gv) => (gv.name.clone(), vec![]),
+                                _ => continue,
+                            };
+                            if item_name == name {
+                                let base_ty = self.item_types.get(&i).copied().unwrap();
+                                found_ty = Some(self.instantiate(base_ty, &item_generic_params));
+                                break;
+                            }
                         }
                     }
 
@@ -241,28 +258,49 @@ impl<'a> TypeInfer<'a> {
                             }
 
                             if let Some((enum_idx, variant)) = found_variant {
+                                let mut enum_type_params = HashMap::new();
+                                let generic_params = if let HirItem::Enum(e) = &self.module.items[enum_idx] {
+                                    e.generic_params.clone()
+                                } else {
+                                    vec![]
+                                };
+                                let generic_params_clone_2 = generic_params.clone();
+                                for tp in generic_params {
+                                    let ty = self.get_or_create_type(HirType::GenericParam(tp.clone()));
+                                    enum_type_params.insert(tp, ty);
+                                }
+                                let old_params = std::mem::replace(&mut self.type_params, enum_type_params);
+
+                                let mut sig_to_inst = None;
                                 match variant {
                                     HirEnumVariant::Unit(_) => {
-                                        found_ty = Some(self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx))));
+                                        found_ty = Some(self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx), vec![])));
                                     }
                                     HirEnumVariant::Tuple(_, params) => {
                                         let mut sig = Vec::new();
-                                        let ret_ty = self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx)));
+                                        let ret_ty = self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx), vec![]));
                                         sig.push(ret_ty);
                                         for p in params {
                                             sig.push(self.resolve_type_expr(p)?);
                                         }
-                                        found_ty = Some(self.get_or_create_type(HirType::Func(sig)));
+                                        sig_to_inst = Some(self.get_or_create_type(HirType::Func(sig)));
                                     }
                                     HirEnumVariant::Struct(_, fields) => {
                                         let mut sig = Vec::new();
-                                        let ret_ty = self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx)));
+                                        let ret_ty = self.get_or_create_type(HirType::Enum(crate::hir::id::DefId(enum_idx), vec![]));
                                         sig.push(ret_ty);
                                         for f in fields {
                                             sig.push(self.resolve_type_expr(f.type_expr)?);
                                         }
-                                        found_ty = Some(self.get_or_create_type(HirType::Func(sig)));
+                                        sig_to_inst = Some(self.get_or_create_type(HirType::Func(sig)));
                                     }
+                                }
+                                self.type_params = old_params;
+
+                                if let Some(s) = sig_to_inst {
+                                    found_ty = Some(self.instantiate(s, &generic_params_clone_2));
+                                } else if let Some(ty) = found_ty {
+                                    found_ty = Some(self.instantiate(ty, &generic_params_clone_2));
                                 }
                             }
                         }
@@ -307,12 +345,32 @@ impl<'a> TypeInfer<'a> {
                 }
 
                 if let (Some(s), Some(did)) = (struct_def, def_id) {
+                    let mut mapping = HashMap::new();
+                    for param in &s.generic_params {
+                        mapping.insert(param.clone(), self.new_infer_ty());
+                    }
+                    let mut arg_tys = Vec::new();
+                    for param in &s.generic_params {
+                        arg_tys.push(mapping[param]);
+                    }
+                    let instance_ty = self.get_or_create_type(HirType::Struct(did, arg_tys));
+
                     for (f_name, f_expr_id) in fields {
                         let f_ty = self.infer_expr(*f_expr_id)?;
                         let mut found = false;
                         for s_field in &s.fields {
                             if &s_field.name == f_name {
-                                let expected_f_ty = self.resolve_type_expr(s_field.type_expr)?;
+                                // 临时设置结构体的泛型环境
+                                let mut struct_type_params = HashMap::new();
+                                for tp in &s.generic_params {
+                                    let ty = self.get_or_create_type(HirType::GenericParam(tp.clone()));
+                                    struct_type_params.insert(tp.clone(), ty);
+                                }
+                                let old_params = std::mem::replace(&mut self.type_params, struct_type_params);
+                                let expected_f_ty_base = self.resolve_type_expr(s_field.type_expr)?;
+                                self.type_params = old_params;
+
+                                let expected_f_ty = self.substitute(expected_f_ty_base, &mapping);
                                 self.unify(f_ty, expected_f_ty)?;
                                 found = true;
                                 break;
@@ -322,7 +380,7 @@ impl<'a> TypeInfer<'a> {
                             return Err(format!("Field {} not found in struct {}", f_name, struct_name));
                         }
                     }
-                    self.get_or_create_type(HirType::Struct(did))
+                    instance_ty
                 } else {
                     return Err(format!("Struct {} not found", struct_name));
                 }
@@ -333,18 +391,35 @@ impl<'a> TypeInfer<'a> {
                 let obj_hir_ty = self.module.types[obj_ty_followed.0].clone();
                 let mut resolved_id = None;
                 let ty = match obj_hir_ty {
-                    HirType::Struct(def_id) => {
+                    HirType::Struct(def_id, args) => {
                         let mut member_ty = None;
-                        let (s_name, s_fields) = if let HirItem::Struct(s) = &self.module.items[def_id.0] {
-                            (s.name.clone(), s.fields.clone())
+                        let (s_name, s_fields, s_generic_params) = if let HirItem::Struct(s) = &self.module.items[def_id.0] {
+                            (s.name.clone(), s.fields.clone(), s.generic_params.clone())
                         } else {
                             return Err("Expected struct item".to_string());
                         };
 
+                        let mut mapping = HashMap::new();
+                        for (i, param) in s_generic_params.iter().enumerate() {
+                            if i < args.len() {
+                                mapping.insert(param.clone(), args[i]);
+                            }
+                        }
+
                         // 1. Check fields
                         for field in &s_fields {
                             if &field.name == member {
-                                member_ty = Some(self.resolve_type_expr(field.type_expr)?);
+                                // Temp set the struct's generic environment
+                                let mut struct_type_params = HashMap::new();
+                                for tp in &s_generic_params {
+                                    let ty = self.get_or_create_type(HirType::GenericParam(tp.clone()));
+                                    struct_type_params.insert(tp.clone(), ty);
+                                }
+                                let old_params = std::mem::replace(&mut self.type_params, struct_type_params);
+                                let field_ty_base = self.resolve_type_expr(field.type_expr)?;
+                                self.type_params = old_params;
+
+                                member_ty = Some(self.substitute(field_ty_base, &mapping));
                                 break;
                             }
                         }
@@ -353,10 +428,14 @@ impl<'a> TypeInfer<'a> {
                             // 2. Check impls
                             for i in 0..self.module.items.len() {
                                 if let HirItem::Impl(im) = &self.module.items[i] {
-                                    if im.target_name == s_name {
+                                    let im = im.clone();
+                                    // Check if the target type matches
+                                    let target_ty = self.resolve_type_expr(im.target_type)?;
+                                    if self.follow_id(target_ty) == obj_ty_followed {
                                         for method_def_id in &im.items {
                                             if let HirItem::Func(f) = &self.module.items[method_def_id.0] {
-                                                if f.name == format!("{}::{}", s_name, member) {
+                                                // the format is "impl::method" or "s_name::method"
+                                                if f.name.ends_with(&format!("::{}", member)) || f.name == *member {
                                                     member_ty = self.item_types.get(&method_def_id.0).copied();
                                                     resolved_id = Some(*method_def_id);
                                                     break;
@@ -390,6 +469,9 @@ impl<'a> TypeInfer<'a> {
         let ty_id = match ty_expr.kind {
             HirTypeExprKind::Unit => self.get_or_create_type(HirType::Unit),
             HirTypeExprKind::Path(name) => {
+                if let Some(ty) = self.type_params.get(&name) {
+                    return Ok(*ty);
+                }
                 if name == "int" {
                     self.get_or_create_type(HirType::Int(32))
                 } else if name == "bool" {
@@ -415,13 +497,46 @@ impl<'a> TypeInfer<'a> {
 
                     if let Some(id) = def_id {
                         if is_enum {
-                            self.get_or_create_type(HirType::Enum(id))
+                            self.get_or_create_type(HirType::Enum(id, vec![]))
                         } else {
-                            self.get_or_create_type(HirType::Struct(id))
+                            self.get_or_create_type(HirType::Struct(id, vec![]))
                         }
                     } else {
-                        self.get_or_create_type(HirType::Unknown)
+                        return Err(format!("Type not found: {}", name));
                     }
+                }
+            }
+            HirTypeExprKind::Generic(name, args) => {
+                let mut arg_tys = Vec::new();
+                for arg in args {
+                    arg_tys.push(self.resolve_type_expr(arg)?);
+                }
+
+                let mut def_id = None;
+                let mut is_enum = false;
+                for (i, item) in self.module.items.iter().enumerate() {
+                    match item {
+                        HirItem::Struct(s) if s.name == name => {
+                            def_id = Some(crate::hir::id::DefId(i));
+                            break;
+                        }
+                        HirItem::Enum(e) if e.name == name => {
+                            def_id = Some(crate::hir::id::DefId(i));
+                            is_enum = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let Some(id) = def_id {
+                    if is_enum {
+                        self.get_or_create_type(HirType::Enum(id, arg_tys))
+                    } else {
+                        self.get_or_create_type(HirType::Struct(id, arg_tys))
+                    }
+                } else {
+                    return Err(format!("Generic type not found: {}", name));
                 }
             }
             HirTypeExprKind::Func(params, ret) => {
@@ -483,6 +598,24 @@ impl<'a> TypeInfer<'a> {
                 }
                 Ok(())
             }
+            (HirType::Struct(id1, args1), HirType::Struct(id2, args2)) => {
+                if id1 != id2 || args1.len() != args2.len() {
+                    return Err(format!("Type mismatch: Struct {:?}<{}> vs {:?}<{}>", id1, args1.len(), id2, args2.len()));
+                }
+                for (a, b) in args1.into_iter().zip(args2.into_iter()) {
+                    self.unify(a, b)?;
+                }
+                Ok(())
+            }
+            (HirType::Enum(id1, args1), HirType::Enum(id2, args2)) => {
+                if id1 != id2 || args1.len() != args2.len() {
+                    return Err(format!("Type mismatch: Enum {:?} vs {:?}", id1, id2));
+                }
+                for (a, b) in args1.into_iter().zip(args2.into_iter()) {
+                    self.unify(a, b)?;
+                }
+                Ok(())
+            }
             (a, b) if a == b => Ok(()),
             (a, b) => Err(format!("Cannot unify {:?} and {:?}", a, b)),
         }
@@ -497,5 +630,69 @@ impl<'a> TypeInfer<'a> {
             }
         }
         id
+    }
+
+    fn instantiate(&mut self, ty_id: TyId, generic_params: &[String]) -> TyId {
+        if generic_params.is_empty() {
+            return ty_id;
+        }
+        let ty = self.module.types[ty_id.0].clone();
+        let mut mapping = HashMap::new();
+        for param in generic_params {
+            mapping.insert(param.clone(), self.new_infer_ty());
+        }
+
+        match ty {
+            HirType::Struct(id, args) if args.is_empty() => {
+                let mut new_args = Vec::new();
+                for param in generic_params {
+                    new_args.push(mapping[param]);
+                }
+                self.get_or_create_type(HirType::Struct(id, new_args))
+            }
+            HirType::Enum(id, args) if args.is_empty() => {
+                let mut new_args = Vec::new();
+                for param in generic_params {
+                    new_args.push(mapping[param]);
+                }
+                self.get_or_create_type(HirType::Enum(id, new_args))
+            }
+            _ => self.substitute(ty_id, &mapping),
+        }
+    }
+
+    fn substitute(&mut self, ty_id: TyId, mapping: &HashMap<String, TyId>) -> TyId {
+        let ty = self.module.types[ty_id.0].clone();
+        match ty {
+            HirType::GenericParam(name) => {
+                if let Some(new_ty) = mapping.get(&name) {
+                    *new_ty
+                } else {
+                    ty_id
+                }
+            }
+            HirType::Func(sig) => {
+                let mut new_sig = Vec::new();
+                for t in sig {
+                    new_sig.push(self.substitute(t, mapping));
+                }
+                self.get_or_create_type(HirType::Func(new_sig))
+            }
+            HirType::Struct(id, args) => {
+                let mut new_args = Vec::new();
+                for t in args {
+                    new_args.push(self.substitute(t, mapping));
+                }
+                self.get_or_create_type(HirType::Struct(id, new_args))
+            }
+            HirType::Enum(id, args) => {
+                let mut new_args = Vec::new();
+                for t in args {
+                    new_args.push(self.substitute(t, mapping));
+                }
+                self.get_or_create_type(HirType::Enum(id, new_args))
+            }
+            _ => ty_id,
+        }
     }
 }

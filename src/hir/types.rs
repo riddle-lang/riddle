@@ -11,10 +11,11 @@ pub enum HirType {
     Unit,
     /// ret, param*
     Func(Vec<TyId>),
-    /// DefId of the struct
-    Struct(crate::hir::id::DefId),
-    /// DefId of the enum
-    Enum(crate::hir::id::DefId),
+    /// DefId of the struct, Generic arguments
+    Struct(crate::hir::id::DefId, Vec<TyId>),
+    /// DefId of the enum, Generic arguments
+    Enum(crate::hir::id::DefId, Vec<TyId>),
+    GenericParam(String),
     /// For bidirectional type checking / inference
     Infer(InferTy),
     Unknown,

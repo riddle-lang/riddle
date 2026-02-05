@@ -14,6 +14,7 @@ pub enum HirItem {
 #[derive(Debug, Clone)]
 pub struct HirTrait {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub id: DefId,
     pub items: Vec<HirTraitItem>,
 }
@@ -21,14 +22,16 @@ pub struct HirTrait {
 #[derive(Debug, Clone)]
 pub struct HirTraitItem {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub params: Vec<HirFuncParam>,
     pub ret: TyExprId,
 }
 
 #[derive(Debug, Clone)]
 pub struct HirImpl {
-    pub trait_name: Option<String>,
-    pub target_name: String,
+    pub generic_params: Vec<String>,
+    pub trait_type: Option<TyExprId>,
+    pub target_type: TyExprId,
     pub items: Vec<DefId>,
     pub id: DefId,
 }
@@ -42,6 +45,7 @@ pub struct HirStructField {
 #[derive(Debug, Clone)]
 pub struct HirStruct {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub fields: Vec<HirStructField>,
     pub id: DefId,
 }
@@ -56,6 +60,7 @@ pub struct HirFuncParam {
 #[derive(Debug, Clone)]
 pub struct HirFunc {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub param: Vec<HirFuncParam>,
     pub ret: TyExprId,
     pub id: DefId,
@@ -74,6 +79,7 @@ pub struct HirExternFunc {
 #[derive(Debug, Clone)]
 pub struct HirEnum {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub id: DefId,
     pub variants: Vec<HirEnumVariant>,
 }

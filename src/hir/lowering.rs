@@ -57,6 +57,7 @@ impl<'a> AstLower<'a> {
                 }
                 AstNode::FuncDecl {
                     name,
+                    generic_params,
                     params,
                     return_type,
                     body,
@@ -80,7 +81,7 @@ impl<'a> AstLower<'a> {
 
                     let func_id = self
                         .builder
-                        .create_func(name, ret, p)
+                        .create_func(name, generic_params.clone(), ret, p)
                         .map_err(|_| "Failed to create function".to_string())?;
 
                     self.builder.set_func(func_id);
@@ -88,7 +89,11 @@ impl<'a> AstLower<'a> {
                     self.lower_block(body)?;
                     self.deep -= 1;
                 }
-                AstNode::StructDecl { name, fields } => {
+                AstNode::StructDecl {
+                    name,
+                    generic_params,
+                    fields,
+                } => {
                     let mut hir_fields = Vec::new();
                     for field in fields {
                         let type_expr = self.lower_type_expr(&field.type_expr)?;
@@ -99,10 +104,14 @@ impl<'a> AstLower<'a> {
                         });
                     }
                     self.builder
-                        .create_struct(name, hir_fields)
+                        .create_struct(name, generic_params.clone(), hir_fields)
                         .map_err(|_| "Failed to create struct".to_string())?;
                 }
-                AstNode::EnumDecl { name, variants } => {
+                AstNode::EnumDecl {
+                    name,
+                    generic_params,
+                    variants,
+                } => {
                     let mut hir_variants = Vec::new();
                     for variant in variants {
                         match variant {
@@ -134,10 +143,14 @@ impl<'a> AstLower<'a> {
                         }
                     }
                     self.builder
-                        .create_enum(name, hir_variants)
+                        .create_enum(name, generic_params.clone(), hir_variants)
                         .map_err(|_| "Failed to create enum".to_string())?;
                 }
-                AstNode::TraitDecl { name, items } => {
+                AstNode::TraitDecl {
+                    name,
+                    generic_params,
+                    items,
+                } => {
                     let mut hir_items = Vec::new();
                     for item in items {
                         // Lower params
@@ -156,30 +169,40 @@ impl<'a> AstLower<'a> {
                         let ret_te = if let Some(ret) = &item.return_type {
                             self.lower_type_expr(ret)?
                         } else {
-                            crate::hir::type_expr::HirTypeExpr::new(
-                                crate::hir::type_expr::HirTypeExprKind::Unit,
-                            )
+                            HirTypeExpr::new(HirTypeExprKind::Unit)
                         };
                         let ret = self.builder.create_type_expr(ret_te);
                         hir_items.push(HirTraitItem {
                             name: item.name.clone(),
+                            generic_params: item.generic_params.clone(),
                             params,
                             ret,
                         });
                     }
                     self.builder
-                        .create_trait(name, hir_items)
+                        .create_trait(name, generic_params.clone(), hir_items)
                         .map_err(|_| "Failed to create trait".to_string())?;
                 }
                 AstNode::ImplDecl {
-                    trait_name,
-                    target_name,
+                    generic_params,
+                    trait_type,
+                    target_type,
                     items,
                 } => {
+                    let trait_te = if let Some(tr) = trait_type {
+                        let tr_le = self.lower_type_expr(tr)?;
+                        Some(self.builder.create_type_expr(tr_le))
+                    } else {
+                        None
+                    };
+                    let target_le = self.lower_type_expr(target_type)?;
+                    let target_te = self.builder.create_type_expr(target_le);
+
                     let mut methods = Vec::new();
                     for it in items {
                         if let AstNode::FuncDecl {
                             name,
+                            generic_params: method_generic_params,
                             params,
                             return_type,
                             body,
@@ -202,10 +225,11 @@ impl<'a> AstLower<'a> {
                             };
                             let ret = self.builder.create_type_expr(ret);
 
-                            let mangled_name = format!("{}::{}", target_name, name);
+                            // TODO: mangled name for generic target type
+                            let mangled_name = format!("impl::{}", name);
                             let func_id = self
                                 .builder
-                                .create_func(&mangled_name, ret, p)
+                                .create_func(&mangled_name, method_generic_params.clone(), ret, p)
                                 .map_err(|_| "Failed to create function".to_string())?;
 
                             self.builder.set_func(func_id);
@@ -217,7 +241,7 @@ impl<'a> AstLower<'a> {
                         }
                     }
                     self.builder
-                        .create_impl(trait_name.clone(), target_name.clone(), methods)
+                        .create_impl(generic_params.clone(), trait_te, target_te, methods)
                         .map_err(|_| "Failed to create impl".to_string())?;
                 }
                 AstNode::ExternBlock { abi, functions } => {
@@ -268,6 +292,19 @@ impl<'a> AstLower<'a> {
         match type_expr.as_ref() {
             AstNode::Identifier(name) => Ok(HirTypeExpr::new(HirTypeExprKind::Path(name.clone()))),
             AstNode::Path(parts) => Ok(HirTypeExpr::new(HirTypeExprKind::Path(parts.join("::")))),
+            AstNode::TypeExpr { path, args } => {
+                let name = path.join("::");
+                if args.is_empty() {
+                    Ok(HirTypeExpr::new(HirTypeExprKind::Path(name)))
+                } else {
+                    let mut hir_args = Vec::new();
+                    for arg in args {
+                        let arg_te = self.lower_type_expr(&Box::new(arg.clone()))?;
+                        hir_args.push(self.builder.create_type_expr(arg_te));
+                    }
+                    Ok(HirTypeExpr::new(HirTypeExprKind::Generic(name, hir_args)))
+                }
+            }
             _ => Err(format!("Unexpected node in type expr: {:?}", type_expr)),
         }
     }

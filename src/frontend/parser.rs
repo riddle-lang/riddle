@@ -24,16 +24,14 @@ fn parse_extern_item(pair: Pair<Rule>) -> ExternFunc {
             Rule::func_param => {
                 let mut p_inner = p.into_inner();
                 let p_name = p_inner.next().unwrap().as_str().to_string();
-                let p_type = Box::new(parse_pair(
-                    p_inner.next().unwrap().into_inner().next().unwrap(),
-                ));
+                let p_type = Box::new(parse_pair(p_inner.next().unwrap()));
                 params.push(FuncParam {
                     name: p_name,
                     type_expr: p_type,
                 });
             }
             Rule::type_expr => {
-                return_type = Some(Box::new(parse_pair(p.into_inner().next().unwrap())))
+                return_type = Some(Box::new(parse_pair(p)))
             }
             _ => unreachable!(),
         }
@@ -43,6 +41,16 @@ fn parse_extern_item(pair: Pair<Rule>) -> ExternFunc {
         params,
         return_type,
     }
+}
+
+fn parse_generic_params(pair: Pair<Rule>) -> Vec<String> {
+    pair.into_inner()
+        .map(|p| p.as_str().to_string())
+        .collect()
+}
+
+fn parse_generic_args(pair: Pair<Rule>) -> Vec<AstNode> {
+    pair.into_inner().map(parse_pair).collect()
 }
 
 fn parse_pair(pair: Pair<Rule>) -> AstNode {
@@ -63,10 +71,10 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                 match p.as_rule() {
                     Rule::identifier => name = p.as_str().to_string(),
                     Rule::type_expr => {
-                        type_expr = Some(Box::new(parse_pair(p.into_inner().next().unwrap())))
+                        type_expr = Some(Box::new(parse_pair(p)))
                     }
                     Rule::value_expr => {
-                        value = Some(Box::new(parse_pair(p.into_inner().next().unwrap())))
+                        value = Some(Box::new(parse_pair(p)))
                     }
                     _ => unreachable!(),
                 }
@@ -80,25 +88,25 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
         Rule::func_decl => {
             let mut inner = pair.into_inner();
             let name = inner.next().unwrap().as_str().to_string();
+            let mut generic_params = Vec::new();
             let mut params = Vec::new();
             let mut return_type = None;
             let mut body = None;
 
             for p in inner {
                 match p.as_rule() {
+                    Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::func_param => {
                         let mut p_inner = p.into_inner();
                         let p_name = p_inner.next().unwrap().as_str().to_string();
-                        let p_type = Box::new(parse_pair(
-                            p_inner.next().unwrap().into_inner().next().unwrap(),
-                        ));
+                        let p_type = Box::new(parse_pair(p_inner.next().unwrap()));
                         params.push(FuncParam {
                             name: p_name,
                             type_expr: p_type,
                         });
                     }
                     Rule::type_expr => {
-                        return_type = Some(Box::new(parse_pair(p.into_inner().next().unwrap())))
+                        return_type = Some(Box::new(parse_pair(p)))
                     }
                     Rule::block => body = Some(Box::new(parse_pair(p))),
                     _ => unreachable!(),
@@ -106,6 +114,7 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
             }
             AstNode::FuncDecl {
                 name,
+                generic_params,
                 params,
                 return_type,
                 body: body.unwrap(),
@@ -114,15 +123,15 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
         Rule::struct_decl => {
             let mut inner = pair.into_inner();
             let name = inner.next().unwrap().as_str().to_string();
+            let mut generic_params = Vec::new();
             let mut fields = Vec::new();
             for p in inner {
                 match p.as_rule() {
+                    Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::struct_field => {
                         let mut f_inner = p.into_inner();
                         let f_name = f_inner.next().unwrap().as_str().to_string();
-                        let f_type = Box::new(parse_pair(
-                            f_inner.next().unwrap().into_inner().next().unwrap(),
-                        ));
+                        let f_type = Box::new(parse_pair(f_inner.next().unwrap()));
                         fields.push(StructField {
                             name: f_name,
                             type_expr: f_type,
@@ -131,14 +140,20 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                     _ => unreachable!(),
                 }
             }
-            AstNode::StructDecl { name, fields }
+            AstNode::StructDecl {
+                name,
+                generic_params,
+                fields,
+            }
         }
         Rule::enum_decl => {
             let mut inner = pair.into_inner();
             let name = inner.next().unwrap().as_str().to_string();
+            let mut generic_params = Vec::new();
             let mut variants = Vec::new();
             for p in inner {
                 match p.as_rule() {
+                    Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::enum_variant => {
                         let mut v_inner = p.into_inner();
                         let v_name = v_inner.next().unwrap().as_str().to_string();
@@ -155,14 +170,7 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                                             let mut f_inner = f.into_inner();
                                             let f_name =
                                                 f_inner.next().unwrap().as_str().to_string();
-                                            let f_type = Box::new(parse_pair(
-                                                f_inner
-                                                    .next()
-                                                    .unwrap()
-                                                    .into_inner()
-                                                    .next()
-                                                    .unwrap(),
-                                            ));
+                                            let f_type = Box::new(parse_pair(f_inner.next().unwrap()));
                                             StructField {
                                                 name: f_name,
                                                 type_expr: f_type,
@@ -180,42 +188,49 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                     _ => unreachable!(),
                 }
             }
-            AstNode::EnumDecl { name, variants }
+            AstNode::EnumDecl {
+                name,
+                generic_params,
+                variants,
+            }
         }
         Rule::trait_decl => {
             let mut inner = pair.into_inner();
             let name = inner.next().unwrap().as_str().to_string();
+            let mut generic_params = Vec::new();
             let mut items = Vec::new();
             for p in inner {
                 match p.as_rule() {
+                    Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::trait_item => {
                         let mut item_inner = p.into_inner();
                         let item_name = item_inner.next().unwrap().as_str().to_string();
+                        let mut item_generic_params = Vec::new();
                         let mut params = Vec::new();
                         let mut return_type = None;
                         for param_p in item_inner {
                             match param_p.as_rule() {
+                                Rule::generic_params => {
+                                    item_generic_params = parse_generic_params(param_p)
+                                }
                                 Rule::func_param => {
                                     let mut p_inner = param_p.into_inner();
                                     let p_name = p_inner.next().unwrap().as_str().to_string();
-                                    let p_type = Box::new(parse_pair(
-                                        p_inner.next().unwrap().into_inner().next().unwrap(),
-                                    ));
+                                    let p_type = Box::new(parse_pair(p_inner.next().unwrap()));
                                     params.push(FuncParam {
                                         name: p_name,
                                         type_expr: p_type,
                                     });
                                 }
                                 Rule::type_expr => {
-                                    return_type = Some(Box::new(parse_pair(
-                                        param_p.into_inner().next().unwrap(),
-                                    )))
+                                    return_type = Some(Box::new(parse_pair(param_p)))
                                 }
                                 _ => unreachable!(),
                             }
                         }
                         items.push(TraitItem {
                             name: item_name,
+                            generic_params: item_generic_params,
                             params,
                             return_type,
                         });
@@ -223,32 +238,27 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                     _ => unreachable!(),
                 }
             }
-            AstNode::TraitDecl { name, items }
+            AstNode::TraitDecl {
+                name,
+                generic_params,
+                items,
+            }
         }
         Rule::impl_decl => {
-            let mut trait_name: Option<String> = None;
-            let mut target_name: String = String::new();
+            let mut generic_params = Vec::new();
+            let mut first_type: Option<AstNode> = None;
+            let mut second_type: Option<AstNode> = None;
             let mut items: Vec<AstNode> = Vec::new();
-
-            let mut got_first_path = false;
-            let mut first_path = String::new();
 
             for p in pair.into_inner() {
                 match p.as_rule() {
-                    Rule::path => {
-                        let path_str = p.into_inner().map(|i| i.as_str().trim()).collect::<Vec<_>>().join("::");
-                        if !got_first_path {
-                            got_first_path = true;
-                            first_path = path_str;
-                        } else {
-                            // Unexpected extra path (shouldn't happen with current grammar)
-                            target_name = path_str;
-                        }
-                    }
+                    Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::type_expr => {
-                        // If we see a type_expr after first path, it's the target of `for` clause
-                        trait_name = Some(first_path.clone());
-                        target_name = p.into_inner().next().unwrap().into_inner().map(|i| i.as_str().trim()).collect::<Vec<_>>().join("::");
+                        if first_type.is_none() {
+                            first_type = Some(parse_pair(p));
+                        } else {
+                            second_type = Some(parse_pair(p));
+                        }
                     }
                     Rule::func_decl => {
                         items.push(parse_pair(p));
@@ -257,14 +267,16 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                 }
             }
 
-            if target_name.is_empty() {
-                // Inherent impl: `impl Type { ... }`
-                target_name = first_path;
-            }
+            let (trait_type, target_type) = if let Some(target) = second_type {
+                (first_type.map(Box::new), Box::new(target))
+            } else {
+                (None, Box::new(first_type.unwrap()))
+            };
 
             AstNode::ImplDecl {
-                trait_name,
-                target_name,
+                generic_params,
+                trait_type,
+                target_type,
                 items,
             }
         }
@@ -404,7 +416,21 @@ fn parse_pair(pair: Pair<Rule>) -> AstNode {
                 AstNode::Path(parts)
             }
         }
-        Rule::type_expr => parse_pair(pair.into_inner().next().unwrap()),
+        Rule::type_expr => {
+            let mut inner = pair.into_inner();
+            let path_pair = inner.next().unwrap();
+            let parts: Vec<String> = path_pair
+                .into_inner()
+                .map(|p| p.as_str().trim().to_string())
+                .collect();
+            let args = if let Some(args_pair) = inner.next() {
+                parse_generic_args(args_pair)
+            } else {
+                Vec::new()
+            };
+            AstNode::TypeExpr { path: parts, args }
+        }
+        Rule::value_expr => parse_pair(pair.into_inner().next().unwrap()),
         Rule::bool => AstNode::Literal(Literal::Bool(pair.as_str().parse().unwrap())),
         Rule::number => AstNode::Literal(Literal::Int(pair.as_str().parse().unwrap())),
         Rule::float => AstNode::Literal(Literal::Float(pair.as_str().parse().unwrap())),

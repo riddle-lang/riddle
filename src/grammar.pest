@@ -24,25 +24,27 @@ extern_decl  = { "extern" ~ string? ~ extern_item }
 extern_item  = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
 
 var_decl  = { ("var" | "let") ~ identifier ~ (":" ~ type_expr)? ~ ("=" ~ value_expr)? ~ ";" }
-type_expr = { path }
+type_expr = { path ~ generic_args? }
+generic_args = { "<" ~ type_expr ~ ("," ~ type_expr)* ~ ">" }
+generic_params = { "<" ~ identifier ~ ("," ~ identifier)* ~ ">" }
 value_expr = { expr }
 
 func_param = { identifier ~ ":" ~ type_expr }
 
-func_decl = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ block }
+func_decl = { "fun" ~ identifier ~ generic_params? ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ block }
 
-struct_decl   = { "struct" ~ identifier ~ "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
+struct_decl   = { "struct" ~ identifier ~ generic_params? ~ "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
 struct_field  = { identifier ~ ":" ~ type_expr }
 
-enum_decl     = { "enum" ~ identifier ~ "{" ~ (enum_variant ~ ("," ~ enum_variant)*)? ~ ","? ~ "}" }
+enum_decl     = { "enum" ~ identifier ~ generic_params? ~ "{" ~ (enum_variant ~ ("," ~ enum_variant)*)? ~ ","? ~ "}" }
 enum_variant  = { identifier ~ (enum_tuple | enum_struct)? }
 enum_tuple    = { "(" ~ (type_expr ~ ("," ~ type_expr)*)? ~ ")" }
 enum_struct   = { "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
 
-trait_decl = { "trait" ~ identifier ~ "{" ~ trait_item* ~ "}" }
-trait_item = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
+trait_decl = { "trait" ~ identifier ~ generic_params? ~ "{" ~ trait_item* ~ "}" }
+trait_item = { "fun" ~ identifier ~ generic_params? ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
 
-impl_decl = { "impl" ~ path ~ ("for" ~ type_expr)? ~ "{" ~ func_decl* ~ "}" }
+impl_decl = { "impl" ~ generic_params? ~ type_expr ~ ("for" ~ type_expr)? ~ "{" ~ func_decl* ~ "}" }
 
 return_stmt = {"return" ~ expr ~ ";"}
 
