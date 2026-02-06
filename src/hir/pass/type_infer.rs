@@ -6,6 +6,7 @@ use crate::hir::stmt::HirStmtKind;
 use crate::hir::items::{HirItem, HirEnumVariant};
 use crate::hir::type_expr::HirTypeExprKind;
 use std::collections::HashMap;
+use crate::error::{RiddleError, Result, Span};
 
 pub struct TypeInfer<'a> {
     module: &'a mut HirModule,
@@ -34,7 +35,7 @@ impl<'a> TypeInfer<'a> {
         }
     }
 
-    pub fn infer(&mut self) -> Result<(), String> {
+    pub fn infer(&mut self) -> Result<()> {
         let item_count = self.module.items.len();
         
         // 1. Collect signatures
@@ -86,7 +87,7 @@ impl<'a> TypeInfer<'a> {
                 HirItem::GlobalVariable(gv) => {
                     let ty = self.item_types[&i];
                     let value_ty = self.infer_expr(gv.value)?;
-                    self.unify(ty, value_ty)?;
+                    self.unify(ty, value_ty, Some(gv.span))?;
                 }
                 _ => {}
             }
@@ -117,7 +118,7 @@ impl<'a> TypeInfer<'a> {
         }
     }
 
-    fn infer_function(&mut self, func: crate::hir::items::HirFunc) -> Result<(), String> {
+    fn infer_function(&mut self, func: crate::hir::items::HirFunc) -> Result<()> {
         self.locals.clear();
         self.type_params.clear();
 
@@ -144,7 +145,7 @@ impl<'a> TypeInfer<'a> {
         Ok(())
     }
 
-    fn infer_stmt(&mut self, stmt_id: StmtId) -> Result<(), String> {
+    fn infer_stmt(&mut self, stmt_id: StmtId) -> Result<()> {
         let stmt = self.module.stmts[stmt_id.0].clone();
         match stmt.kind {
             HirStmtKind::Let { id, ty_annot, init, .. } => {
@@ -157,7 +158,8 @@ impl<'a> TypeInfer<'a> {
                 let init_ty = if let Some(init_expr_id) = init {
                     let ty = self.infer_expr(init_expr_id)?;
                     if let Some(aty) = annot_ty {
-                        self.unify(aty, ty)?;
+                        let s = self.module.stmts[stmt_id.0].span;
+                        self.unify(aty, ty, Some(s))?;
                     }
                     ty
                 } else {
@@ -177,14 +179,15 @@ impl<'a> TypeInfer<'a> {
                 };
                 
                 if let Some(expected) = self.current_ret_ty {
-                    self.unify(expected, ret_ty)?;
+                    let s = self.module.stmts[stmt_id.0].span;
+                    self.unify(expected, ret_ty, Some(s))?;
                 }
             }
         }
         Ok(())
     }
 
-    fn infer_expr(&mut self, expr_id: ExprId) -> Result<TyId, String> {
+    fn infer_expr(&mut self, expr_id: ExprId) -> Result<TyId> {
         let expr = self.module.exprs[expr_id.0].clone();
         let ty = match expr.kind {
             HirExprKind::Literal(lit) => match lit {
@@ -199,7 +202,8 @@ impl<'a> TypeInfer<'a> {
             HirExprKind::BinaryOp { lhs, op, rhs } => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                self.unify(lhs_ty, rhs_ty)?;
+                let s = self.module.exprs[expr_id.0].span;
+                self.unify(lhs_ty, rhs_ty, Some(s))?;
                 if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
                     self.get_or_create_type(HirType::Bool)
                 } else {
@@ -320,7 +324,7 @@ impl<'a> TypeInfer<'a> {
                         }
                     }
 
-                    found_ty.unwrap_or_else(|| self.new_infer_ty())
+                    found_ty.ok_or_else(|| RiddleError::Name(format!("Undefined symbol: {}", name), None))?
                 }
             }
             HirExprKind::Call { callee, args } => {
@@ -335,7 +339,8 @@ impl<'a> TypeInfer<'a> {
                 func_sig.extend(arg_tys);
                 let func_ty = self.get_or_create_type(HirType::Func(func_sig, false));
                 
-                self.unify(callee_ty, func_ty)?;
+                let s = self.module.exprs[expr_id.0].span;
+                self.unify(callee_ty, func_ty, Some(s))?;
                 ret_ty
             }
             HirExprKind::Block { stmts } => {
@@ -385,32 +390,43 @@ impl<'a> TypeInfer<'a> {
                                 self.type_params = old_params;
 
                                 let expected_f_ty = self.substitute(expected_f_ty_base, &mapping);
-                                self.unify(f_ty, expected_f_ty)?;
+                                let s = self.module.exprs[expr_id.0].span;
+                                self.unify(f_ty, expected_f_ty, Some(s))?;
                                 found = true;
                                 break;
                             }
                         }
                         if !found {
-                            return Err(format!("Field {} not found in struct {}", f_name, struct_name));
+                            let s = self.module.exprs[expr_id.0].span;
+                            return Err(RiddleError::Type(format!("Field {} not found in struct {}", f_name, struct_name), Some(s)));
                         }
                     }
                     instance_ty
                 } else {
-                    return Err(format!("Struct {} not found", struct_name));
+                    let s = self.module.exprs[expr_id.0].span;
+                    return Err(RiddleError::Type(format!("Struct {} not found", struct_name), Some(s)));
                 }
             }
             HirExprKind::MemberAccess { object, ref member, .. } => {
                 let obj_ty = self.infer_expr(object)?;
-                let obj_ty_followed = self.follow_id(obj_ty);
-                let obj_hir_ty = self.module.types[obj_ty_followed.0].clone();
+                let mut obj_ty_followed = self.follow_id(obj_ty);
+                let mut obj_hir_ty = self.module.types[obj_ty_followed.0].clone();
+
+                // Auto-dereference
+                while let HirType::Ref(inner) = obj_hir_ty {
+                    obj_ty_followed = self.follow_id(inner);
+                    obj_hir_ty = self.module.types[obj_ty_followed.0].clone();
+                }
+
                 let mut resolved_id = None;
                 let ty = match obj_hir_ty {
                     HirType::Struct(def_id, args) => {
                         let mut member_ty = None;
-                        let (s_name, s_fields, s_generic_params) = if let HirItem::Struct(s) = &self.module.items[def_id.0] {
+                        let (_s_name, s_fields, s_generic_params) = if let HirItem::Struct(s) = &self.module.items[def_id.0] {
                             (s.name.clone(), s.fields.clone(), s.generic_params.clone())
                         } else {
-                            return Err("Expected struct item".to_string());
+                            let s = self.module.exprs[expr_id.0].span;
+                            return Err(RiddleError::Type("Expected struct item".to_string(), Some(s)));
                         };
 
                         let mut mapping = HashMap::new();
@@ -463,9 +479,21 @@ impl<'a> TypeInfer<'a> {
                                 }
                             }
                         }
-                        member_ty.ok_or_else(|| format!("Member {} not found on struct {}", member, s_name))?
+                        member_ty.ok_or_else(|| {
+                            let s = self.module.exprs[expr_id.0].span;
+                            RiddleError::Type(
+                                format!("Member {} not found on type {}", member, self.type_to_string(obj_ty_followed)),
+                                Some(s)
+                            )
+                        })?
                     }
-                    _ => self.new_infer_ty(),
+                    _ => {
+                        let s = self.module.exprs[expr_id.0].span;
+                        return Err(RiddleError::Type(
+                            format!("Cannot access member {} on non-struct type {}", member, self.type_to_string(obj_ty_followed)),
+                            Some(s)
+                        ));
+                    },
                 };
                 if let HirExprKind::MemberAccess { id, .. } = &mut self.module.exprs[expr_id.0].kind {
                     *id = resolved_id;
@@ -478,7 +506,7 @@ impl<'a> TypeInfer<'a> {
         Ok(ty)
     }
 
-    fn resolve_type_expr(&mut self, ty_expr_id: TyExprId) -> Result<TyId, String> {
+    fn resolve_type_expr(&mut self, ty_expr_id: TyExprId) -> Result<TyId> {
         let ty_expr = self.module.type_exprs[ty_expr_id.0].clone();
         let ty_id = match ty_expr.kind {
             HirTypeExprKind::Unit => self.get_or_create_type(HirType::Unit),
@@ -518,7 +546,7 @@ impl<'a> TypeInfer<'a> {
                             self.get_or_create_type(HirType::Struct(id, vec![]))
                         }
                     } else {
-                        return Err(format!("Type not found: {}", name));
+                        return Err(RiddleError::Type(format!("Type not found: {}", name), None));
                     }
                 }
             }
@@ -552,7 +580,7 @@ impl<'a> TypeInfer<'a> {
                         self.get_or_create_type(HirType::Struct(id, arg_tys))
                     }
                 } else {
-                    return Err(format!("Generic type not found: {}", name));
+                    return Err(RiddleError::Type(format!("Generic type not found: {}", name), None));
                 }
             }
             HirTypeExprKind::Func(params, ret) => {
@@ -589,7 +617,7 @@ impl<'a> TypeInfer<'a> {
         id
     }
 
-    fn unify(&mut self, t1: TyId, t2: TyId) -> Result<(), String> {
+    fn unify(&mut self, t1: TyId, t2: TyId, span: Option<Span>) -> Result<()> {
         let t1 = self.follow_id(t1);
         let t2 = self.follow_id(t2);
 
@@ -613,41 +641,103 @@ impl<'a> TypeInfer<'a> {
                 if v1 || v2 {
                     let min_len = if f1.len() < f2.len() { f1.len() } else { f2.len() };
                     for i in 0..min_len {
-                        self.unify(f1[i], f2[i])?;
+                        self.unify(f1[i], f2[i], span)?;
                     }
                 } else {
                     if f1.len() != f2.len() {
-                        return Err(format!("Arity mismatch: {} vs {}", f1.len(), f2.len()));
+                        return Err(RiddleError::Type(format!(
+                            "Arity mismatch: expected {} parameters, found {}",
+                            f1.len() - 1,
+                            f2.len() - 1
+                        ), span));
                     }
                     for (a, b) in f1.into_iter().zip(f2.into_iter()) {
-                        self.unify(a, b)?;
+                        self.unify(a, b, span)?;
                     }
                 }
                 Ok(())
             }
             (HirType::Struct(id1, args1), HirType::Struct(id2, args2)) => {
                 if id1 != id2 || args1.len() != args2.len() {
-                    return Err(format!("Type mismatch: Struct {:?}<{}> vs {:?}<{}>", id1, args1.len(), id2, args2.len()));
+                    return Err(RiddleError::Type(format!(
+                        "Type mismatch: expected {}, found {}",
+                        self.type_to_string(t1),
+                        self.type_to_string(t2)
+                    ), span));
                 }
                 for (a, b) in args1.into_iter().zip(args2.into_iter()) {
-                    self.unify(a, b)?;
+                    self.unify(a, b, span)?;
                 }
                 Ok(())
             }
             (HirType::Enum(id1, args1), HirType::Enum(id2, args2)) => {
                 if id1 != id2 || args1.len() != args2.len() {
-                    return Err(format!("Type mismatch: Enum {:?} vs {:?}", id1, id2));
+                    return Err(RiddleError::Type(format!(
+                        "Type mismatch: expected {}, found {}",
+                        self.type_to_string(t1),
+                        self.type_to_string(t2)
+                    ), span));
                 }
                 for (a, b) in args1.into_iter().zip(args2.into_iter()) {
-                    self.unify(a, b)?;
+                    self.unify(a, b, span)?;
                 }
                 Ok(())
             }
             (HirType::Ref(inner1), HirType::Ref(inner2)) => {
-                self.unify(inner1, inner2)
+                self.unify(inner1, inner2, span)
             }
             (a, b) if a == b => Ok(()),
-            (a, b) => Err(format!("Cannot unify {:?} and {:?}", a, b)),
+            (_, _) => Err(RiddleError::Type(format!(
+                "Cannot unify types: expected {}, found {}",
+                self.type_to_string(t1),
+                self.type_to_string(t2)
+            ), span)),
+        }
+    }
+
+    pub fn type_to_string(&self, ty_id: TyId) -> String {
+        let ty_id = self.follow_id(ty_id);
+        let ty = &self.module.types[ty_id.0];
+        match ty {
+            HirType::Int(w) => format!("int{}", w),
+            HirType::Float => "float".to_string(),
+            HirType::Double => "double".to_string(),
+            HirType::Bool => "bool".to_string(),
+            HirType::Unit => "()".to_string(),
+            HirType::Str => "str".to_string(),
+            HirType::Ref(inner) => format!("&{}", self.type_to_string(*inner)),
+            HirType::Func(sig, var) => {
+                let ret = self.type_to_string(sig[0]);
+                let params: Vec<String> = sig[1..].iter().map(|t| self.type_to_string(*t)).collect();
+                format!("fun({}) -> {}{}", params.join(", "), ret, if *var { "..." } else { "" })
+            }
+            HirType::Struct(def_id, args) => {
+                if let HirItem::Struct(s) = &self.module.items[def_id.0] {
+                    if args.is_empty() {
+                        s.name.clone()
+                    } else {
+                        let args_str: Vec<String> = args.iter().map(|t| self.type_to_string(*t)).collect();
+                        format!("{}<{}>", s.name, args_str.join(", "))
+                    }
+                } else {
+                    "struct".to_string()
+                }
+            }
+            HirType::Enum(def_id, args) => {
+                if let HirItem::Enum(e) = &self.module.items[def_id.0] {
+                    if args.is_empty() {
+                        e.name.clone()
+                    } else {
+                        let args_str: Vec<String> = args.iter().map(|t| self.type_to_string(*t)).collect();
+                        format!("{}<{}>", e.name, args_str.join(", "))
+                    }
+                } else {
+                    "enum".to_string()
+                }
+            }
+            HirType::GenericParam(name) => name.clone(),
+            HirType::Infer(InferTy::Id(id)) => format!("?{}", id),
+            HirType::Unknown => "unknown".to_string(),
         }
     }
 

@@ -1,4 +1,5 @@
 use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyExprId};
+use crate::error::Span;
 
 #[derive(Debug, Clone)]
 pub enum HirItem {
@@ -17,6 +18,7 @@ pub struct HirTrait {
     pub generic_params: Vec<String>,
     pub id: DefId,
     pub items: Vec<HirTraitItem>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +27,7 @@ pub struct HirTraitItem {
     pub generic_params: Vec<String>,
     pub params: Vec<HirFuncParam>,
     pub ret: TyExprId,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -34,12 +37,14 @@ pub struct HirImpl {
     pub target_type: TyExprId,
     pub items: Vec<DefId>,
     pub id: DefId,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct HirStructField {
     pub name: String,
     pub type_expr: TyExprId,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +53,7 @@ pub struct HirStruct {
     pub generic_params: Vec<String>,
     pub fields: Vec<HirStructField>,
     pub id: DefId,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +71,7 @@ pub struct HirFunc {
     pub ret: TyExprId,
     pub id: DefId,
     pub body: Vec<StmtId>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +82,7 @@ pub struct HirExternFunc {
     pub ret: TyExprId,
     pub id: DefId,
     pub is_variadic: bool,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +91,7 @@ pub struct HirEnum {
     pub generic_params: Vec<String>,
     pub id: DefId,
     pub variants: Vec<HirEnumVariant>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -97,4 +106,5 @@ pub struct HirGlobalVariable {
     pub name: String,
     pub ty: Option<TyExprId>,
     pub value: ExprId,
+    pub span: Span,
 }

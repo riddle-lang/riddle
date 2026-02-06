@@ -1,13 +1,15 @@
 use crate::hir::id::{ExprId, LocalId, TyExprId};
+use crate::error::Span;
 
 #[derive(Debug, Clone)]
 pub struct HirStmt {
     pub kind: HirStmtKind,
+    pub span: Span,
 }
 
 impl HirStmt {
-    pub fn new(kind: HirStmtKind) -> Self {
-        Self { kind }
+    pub fn new(kind: HirStmtKind, span: Span) -> Self {
+        Self { kind, span }
     }
 }
 

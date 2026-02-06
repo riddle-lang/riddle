@@ -1,14 +1,16 @@
 use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId};
+use crate::error::Span;
 
 #[derive(Debug, Clone)]
 pub struct HirExpr {
     pub kind: HirExprKind,
     pub ty: Option<TyId>,
+    pub span: Span,
 }
 
 impl HirExpr {
-    pub fn new(kind: HirExprKind) -> Self {
-        Self { kind, ty: None }
+    pub fn new(kind: HirExprKind, span: Span) -> Self {
+        Self { kind, ty: None, span }
     }
 }
 

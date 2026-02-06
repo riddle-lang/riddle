@@ -8,6 +8,7 @@ use crate::hir::module::HirModule;
 use crate::hir::stmt::{HirStmt, HirStmtKind};
 use crate::hir::type_expr::HirTypeExpr;
 use crate::hir::types::HirType;
+use crate::error::Span;
 
 #[derive(Debug)]
 pub struct HirBuilder<'a> {
@@ -74,6 +75,7 @@ impl<'a> HirBuilder<'a> {
         generic_params: Vec<String>,
         ret: TyExprId,
         param: Vec<HirFuncParam>,
+        span: Span,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let func = HirFunc {
@@ -83,6 +85,7 @@ impl<'a> HirBuilder<'a> {
             ret,
             id,
             body: Vec::new(),
+            span,
         };
         self.module.items.push(HirItem::Func(func));
         Ok(id)
@@ -95,6 +98,7 @@ impl<'a> HirBuilder<'a> {
         ret: TyExprId,
         param: Vec<HirFuncParam>,
         is_variadic: bool,
+        span: Span,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let func = HirExternFunc {
@@ -104,6 +108,7 @@ impl<'a> HirBuilder<'a> {
             ret,
             id,
             is_variadic,
+            span,
         };
         self.module.items.push(HirItem::ExternFunc(func));
         Ok(id)
@@ -114,12 +119,14 @@ impl<'a> HirBuilder<'a> {
         name: &str,
         ty: Option<TyExprId>,
         value: ExprId,
+        span: Span,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let gv = HirGlobalVariable {
             name: name.to_string(),
             ty,
             value,
+            span,
         };
         self.module.items.push(HirItem::GlobalVariable(gv));
         Ok(id)
@@ -130,6 +137,7 @@ impl<'a> HirBuilder<'a> {
         name: &str,
         generic_params: Vec<String>,
         variants: Vec<HirEnumVariant>,
+        span: Span,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let e = HirEnum {
@@ -137,6 +145,7 @@ impl<'a> HirBuilder<'a> {
             generic_params,
             id,
             variants,
+            span,
         };
         self.module.items.push(HirItem::Enum(e));
         Ok(id)
@@ -147,6 +156,7 @@ impl<'a> HirBuilder<'a> {
         name: &str,
         generic_params: Vec<String>,
         fields: Vec<HirStructField>,
+        span: Span,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let s = HirStruct {
@@ -154,6 +164,7 @@ impl<'a> HirBuilder<'a> {
             generic_params,
             fields,
             id,
+            span,
         };
         self.module.items.push(HirItem::Struct(s));
         Ok(id)
@@ -164,6 +175,7 @@ impl<'a> HirBuilder<'a> {
         name: &str,
         generic_params: Vec<String>,
         items: Vec<HirTraitItem>,
+        span: Span,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let t = HirTrait {
@@ -171,6 +183,7 @@ impl<'a> HirBuilder<'a> {
             generic_params,
             id,
             items,
+            span,
         };
         self.module.items.push(HirItem::Trait(t));
         Ok(id)
@@ -182,6 +195,7 @@ impl<'a> HirBuilder<'a> {
         trait_type: Option<TyExprId>,
         target_type: TyExprId,
         methods: Vec<DefId>,
+        span: Span,
     ) -> Result<DefId, HirBuilderError> {
         let id = DefId(self.module.items.len());
         let im = HirImpl {
@@ -190,16 +204,17 @@ impl<'a> HirBuilder<'a> {
             target_type,
             items: methods,
             id,
+            span,
         };
         self.module.items.push(HirItem::Impl(im));
         Ok(id)
     }
 
-    pub fn ret(&mut self, expr: ExprId) -> Result<(), HirBuilderError> {
+    pub fn ret(&mut self, expr: ExprId, span: Span) -> Result<(), HirBuilderError> {
         let func_id = self
             .active_func
             .ok_or(HirBuilderError::CurrentFunctionNotSet)?;
-        let stmt_id = self.create_stmt(HirStmt::new(HirStmtKind::Return { value: Some(expr) }));
+        let stmt_id = self.create_stmt(HirStmt::new(HirStmtKind::Return { value: Some(expr) }, span));
         if let HirItem::Func(func) = &mut self.module.items[func_id.0] {
             func.body.push(stmt_id);
         }
@@ -211,28 +226,32 @@ impl<'a> HirBuilder<'a> {
         name: &str,
         ty_annot: Option<TyExprId>,
         init: Option<ExprId>,
+        span: Span,
     ) -> Result<(), HirBuilderError> {
         let func_id = self
             .active_func
             .ok_or(HirBuilderError::CurrentFunctionNotSet)?;
         let id = self.next_local_id();
-        let stmt_id = self.create_stmt(HirStmt::new(HirStmtKind::Let {
-            name: name.into(),
-            ty_annot,
-            init,
-            id,
-        }));
+        let stmt_id = self.create_stmt(HirStmt::new(
+            HirStmtKind::Let {
+                name: name.into(),
+                ty_annot,
+                init,
+                id,
+            },
+            span,
+        ));
         if let HirItem::Func(func) = &mut self.module.items[func_id.0] {
             func.body.push(stmt_id);
         }
         Ok(())
     }
 
-    pub fn expr_stmt(&mut self, expr: ExprId, has_semi: bool) -> Result<(), HirBuilderError> {
+    pub fn expr_stmt(&mut self, expr: ExprId, has_semi: bool, span: Span) -> Result<(), HirBuilderError> {
         let func_id = self
             .active_func
             .ok_or(HirBuilderError::CurrentFunctionNotSet)?;
-        let stmt_id = self.create_stmt(HirStmt::new(HirStmtKind::Expr { expr, has_semi }));
+        let stmt_id = self.create_stmt(HirStmt::new(HirStmtKind::Expr { expr, has_semi }, span));
         if let HirItem::Func(func) = &mut self.module.items[func_id.0] {
             func.body.push(stmt_id);
         }

@@ -1,5 +1,13 @@
+use crate::error::Span;
+
 #[derive(Debug, Clone)]
-pub enum AstNode {
+pub struct AstNode {
+    pub kind: AstNodeKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum AstNodeKind {
     Program(Vec<AstNode>),
 
     // Statements

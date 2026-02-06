@@ -1,13 +1,14 @@
 use codegen::Codegen;
-use frontend::ast::AstNode::Program;
 use hir::lowering::AstLower;
 use hir::module::HirModule;
 use hir::pass::name_pass::NamePass;
 use hir::pass::type_infer::TypeInfer;
+use crate::frontend::ast::AstNodeKind::Program;
 
 mod codegen;
 mod frontend;
 mod hir;
+mod error;
 
 fn main() {
     let code = r#"
@@ -26,7 +27,7 @@ fn main() {
             let t = ex(1);
             let t2 = ex("str");
             let a = A{x: 1};
-            let t3 = ex(a);
+            let t3 = ex(a).x;
             return printf("hello world %d", t3.x);
         }
     "#;
@@ -34,7 +35,7 @@ fn main() {
     let ast = match frontend::parser::parse(code) {
         Ok(ast) => ast,
         Err(e) => {
-            eprintln!("Parse error:\n{}", e);
+            e.report(code);
             return;
         }
     };
@@ -43,23 +44,26 @@ fn main() {
 
     let mut lower = AstLower::new(
         &mut module,
-        match &ast {
+        match &ast.kind {
             Program(stmts) => stmts,
             _ => unreachable!(),
         },
     );
 
     if let Err(e) = lower.lower() {
-        eprintln!("Lowering error: {}", e);
+        e.report(code);
         return;
     }
 
     let mut name_pass = NamePass::new(&mut module);
-    name_pass.run();
+    if let Err(e) = name_pass.run() {
+        e.report(code);
+        return;
+    }
 
     let mut type_infer = TypeInfer::new(&mut module);
     if let Err(e) = type_infer.infer() {
-        eprintln!("Type inference error: {}", e);
+        e.report(code);
         return;
     }
 
