@@ -11,6 +11,9 @@ mod hir;
 
 fn main() {
     let code = r#"
+        struct A{
+            x: int
+        }
         fun ex<T>(x: T)->T{
             return x;
         }
@@ -22,7 +25,9 @@ fn main() {
             printf("hello %d", 42);
             let t = ex(1);
             let t2 = ex("str");
-            return printf("hello world %d", t);
+            let a = A{x: 1};
+            let t3 = ex(a);
+            return printf("hello world %d", t3.x);
         }
     "#;
 

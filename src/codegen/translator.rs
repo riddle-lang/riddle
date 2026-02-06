@@ -4,6 +4,7 @@ use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId};
 use crate::hir::items::HirItem;
 use crate::hir::module::HirModule;
 use crate::hir::stmt::HirStmtKind;
+use crate::hir::types::HirType;
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use cranelift_object::ObjectModule;
@@ -117,9 +118,20 @@ impl<'a> FunctionTranslator<'a> {
                     _ => unimplemented!("Indirect calls not supported yet"),
                 }
             }
-            HirExprKind::MemberAccess { object, .. } => {
-                self.translate_expr(*object);
-                self.builder.ins().iconst(types::I64, 0)
+            HirExprKind::MemberAccess { object, member, .. } => {
+                let obj_ptr = self.translate_expr(*object);
+                let obj_expr = &self.hir.exprs[object.0];
+                let ty_id = obj_expr.ty.expect("Member access object must have a type");
+                let ty = &self.hir.types[ty_id.0];
+
+                if let HirType::Struct(struct_did, _) = ty {
+                    let offset = self.get_field_offset(*struct_did, member);
+                    self.builder
+                        .ins()
+                        .load(types::I64, MemFlags::new(), obj_ptr, offset as i32)
+                } else {
+                    self.builder.ins().iconst(types::I64, 0)
+                }
             }
             HirExprKind::Block { stmts } => {
                 let mut last_val = self.builder.ins().iconst(types::I64, 0);
@@ -133,13 +145,51 @@ impl<'a> FunctionTranslator<'a> {
                 }
                 last_val
             }
-            HirExprKind::StructInst { fields, .. } => {
-                for (_, expr_id) in fields {
-                    self.translate_expr(*expr_id);
+            HirExprKind::StructInst {
+                struct_name,
+                fields,
+            } => {
+                let mut struct_def = None;
+                let mut did = None;
+                for (i, item) in self.hir.items.iter().enumerate() {
+                    if let HirItem::Struct(s) = item {
+                        if s.name == *struct_name {
+                            struct_def = Some(s);
+                            did = Some(DefId(i));
+                            break;
+                        }
+                    }
                 }
-                self.builder.ins().iconst(types::I64, 0)
+
+                let s = struct_def.expect("Struct not found");
+                let size = (s.fields.len() * 8) as u32;
+                let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    size,
+                    3,
+                ));
+
+                for (f_name, f_expr_id) in fields {
+                    let val = self.translate_expr(*f_expr_id);
+                    let offset = self.get_field_offset(did.unwrap(), f_name);
+                    self.builder.ins().stack_store(val, ss, offset as i32);
+                }
+
+                self.builder.ins().stack_addr(types::I64, ss, 0)
             }
         }
+    }
+
+    fn get_field_offset(&self, struct_did: DefId, member_name: &str) -> usize {
+        let item = &self.hir.items[struct_did.0];
+        if let HirItem::Struct(s) = item {
+            for (i, field) in s.fields.iter().enumerate() {
+                if field.name == member_name {
+                    return i * 8;
+                }
+            }
+        }
+        0
     }
 
     fn call_by_id(
