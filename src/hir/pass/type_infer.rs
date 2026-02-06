@@ -94,6 +94,11 @@ impl<'a> TypeInfer<'a> {
 
         // 3. Finalize types
         self.finalize_types();
+
+        for (idx, ty) in self.item_types.iter() {
+            let ty = self.follow_id(*ty);
+            self.module.item_types.insert(crate::hir::id::DefId(*idx), ty);
+        }
         Ok(())
     }
 
@@ -201,7 +206,7 @@ impl<'a> TypeInfer<'a> {
                     lhs_ty
                 }
             }
-            HirExprKind::Symbol { id, name } => {
+            HirExprKind::Symbol { id, ref name, .. } => {
                 if let Some(local_id) = id {
                     if let Some(ty) = self.locals.get(&local_id) {
                         *ty
@@ -219,9 +224,12 @@ impl<'a> TypeInfer<'a> {
                                 HirItem::GlobalVariable(gv) => (gv.name.clone(), vec![]),
                                 _ => continue,
                             };
-                            if item_name == name {
+                            if item_name == *name {
                                 let base_ty = self.item_types.get(&i).copied().unwrap();
                                 found_ty = Some(self.instantiate(base_ty, &item_generic_params));
+                                if let HirExprKind::Symbol { def_id, .. } = &mut self.module.exprs[expr_id.0].kind {
+                                    *def_id = Some(crate::hir::id::DefId(i));
+                                }
                                 break;
                             }
                         }
@@ -261,6 +269,9 @@ impl<'a> TypeInfer<'a> {
                             }
 
                             if let Some((enum_idx, variant)) = found_variant {
+                                if let HirExprKind::Symbol { def_id, .. } = &mut self.module.exprs[expr_id.0].kind {
+                                    *def_id = Some(crate::hir::id::DefId(enum_idx));
+                                }
                                 let mut enum_type_params = HashMap::new();
                                 let generic_params = if let HirItem::Enum(e) = &self.module.items[enum_idx] {
                                     e.generic_params.clone()

@@ -1,5 +1,6 @@
+use crate::codegen::mangle;
 use crate::codegen::translator::FunctionTranslator;
-use crate::hir::id::DefId;
+use crate::hir::id::{DefId, TyId};
 use crate::hir::items::{HirExternFunc, HirFunc, HirItem};
 use crate::hir::module::HirModule;
 use cranelift::codegen::ir::UserFuncName;
@@ -12,7 +13,8 @@ pub struct Codegen {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
     module: ObjectModule,
-    fn_ids: HashMap<DefId, FuncId>,
+    fn_ids: HashMap<(DefId, Vec<TyId>), FuncId>,
+    queue: Vec<(DefId, Vec<TyId>)>,
 }
 
 impl Codegen {
@@ -36,54 +38,86 @@ impl Codegen {
             ctx: module.make_context(),
             module,
             fn_ids: HashMap::new(),
+            queue: vec![],
         }
     }
 
     pub fn compile(&mut self, hir: &HirModule) {
-        // 1. 声明所有函数
-        for item in &hir.items {
+        for (i, item) in hir.items.iter().enumerate() {
             match item {
-                HirItem::Func(func) => {
-                    let mut sig = self.module.make_signature();
-                    for _ in &func.param {
-                        sig.params.push(AbiParam::new(types::I64));
-                    }
-                    sig.returns.push(AbiParam::new(types::I64));
-
-                    let fn_id = self
-                        .module
-                        .declare_function(&func.name, Linkage::Export, &sig)
-                        .unwrap();
-                    self.fn_ids.insert(func.id, fn_id);
+                HirItem::Func(f) if f.generic_params.is_empty() => {
+                    self.get_or_declare_fn(DefId(i), vec![], hir);
                 }
-                HirItem::ExternFunc(func) => {
-                    let mut sig = self.module.make_signature();
-                    let default_cc = self.module.isa().default_call_conv();
-                    sig.call_conv = default_cc;
-
-                    for _ in &func.param {
-                        sig.params.push(AbiParam::new(types::I64));
-                    }
-                    sig.returns.push(AbiParam::new(types::I64));
-
-                    let fn_id = self
-                        .module
-                        .declare_function(&func.name, Linkage::Import, &sig)
-                        .unwrap();
-                    self.fn_ids.insert(func.id, fn_id);
-                    self.print_extern_decl(func, &sig);
+                HirItem::ExternFunc(_) => {
+                    self.get_or_declare_fn(DefId(i), vec![], hir);
                 }
                 _ => {}
             }
         }
 
-        // 2. 定义函数体
-        let items = hir.items.clone();
-        for item in &items {
-            if let HirItem::Func(func) = item {
-                self.compile_func(func, hir);
+        let mut compiled = std::collections::HashSet::new();
+        while let Some(key) = self.queue.pop() {
+            if compiled.contains(&key) {
+                continue;
             }
+            let (def_id, args) = key.clone();
+            let func = match &hir.items[def_id.0] {
+                HirItem::Func(f) => f.clone(),
+                _ => continue,
+            };
+            self.compile_func(&func, &args, hir);
+            compiled.insert(key);
         }
+    }
+
+    fn get_or_declare_fn(
+        &mut self,
+        def_id: DefId,
+        args: Vec<TyId>,
+        hir: &HirModule,
+    ) -> FuncId {
+        if let Some(&fn_id) = self.fn_ids.get(&(def_id, args.clone())) {
+            return fn_id;
+        }
+
+        let item = &hir.items[def_id.0];
+        let (name, is_extern) = match item {
+            HirItem::Func(f) => (mangle(&f.name, &args), false),
+            HirItem::ExternFunc(f) => (f.name.clone(), true),
+            _ => panic!("Not a function"),
+        };
+
+        let mut sig = self.module.make_signature();
+        if is_extern {
+            sig.call_conv = self.module.isa().default_call_conv();
+        }
+
+        let ty_id = hir.item_types[&def_id];
+        let param_count = match &hir.types[ty_id.0] {
+            crate::hir::types::HirType::Func(sig_types, _) => sig_types.len() - 1,
+            _ => 0,
+        };
+
+        for _ in 0..param_count {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let linkage = if is_extern {
+            Linkage::Import
+        } else {
+            Linkage::Export
+        };
+        let fn_id = self
+            .module
+            .declare_function(&name, linkage, &sig)
+            .unwrap();
+
+        self.fn_ids.insert((def_id, args.clone()), fn_id);
+        if !is_extern {
+            self.queue.push((def_id, args));
+        }
+        fn_id
     }
 
     fn print_extern_decl(&self, func: &HirExternFunc, sig: &Signature) {
@@ -116,11 +150,21 @@ impl Codegen {
         );
     }
 
-    fn compile_func(&mut self, func: &HirFunc, hir: &HirModule) {
-        let fn_id = self.fn_ids[&func.id];
+    fn compile_func(
+        &mut self,
+        func: &HirFunc,
+        generic_args: &[TyId],
+        hir: &HirModule,
+    ) {
+        let fn_id = self.fn_ids[&(func.id, generic_args.to_vec())];
 
         let mut sig = self.module.make_signature();
-        for _ in &func.param {
+        let ty_id = hir.item_types[&func.id];
+        let param_count = match &hir.types[ty_id.0] {
+            crate::hir::types::HirType::Func(sig_types, _) => sig_types.len() - 1,
+            _ => 0,
+        };
+        for _ in 0..param_count {
             sig.params.push(AbiParam::new(types::I64));
         }
         sig.returns.push(AbiParam::new(types::I64));
@@ -131,21 +175,21 @@ impl Codegen {
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
         builder.seal_block(entry_block);
-        let pretty = func.name.clone();
+        let pretty = mangle(&func.name, generic_args);
         builder.func.name = UserFuncName::testcase(pretty);
 
         let mut translator = FunctionTranslator {
             builder,
             module: &mut self.module,
-            fn_ids: &self.fn_ids,
+            fn_ids: &mut self.fn_ids,
+            specialization_queue: &mut self.queue,
             variables: HashMap::new(),
             hir,
         };
 
         for (i, param) in func.param.iter().enumerate() {
             let val = translator.builder.block_params(entry_block)[i];
-            let var = Variable::new(param.id.0);
-            translator.builder.declare_var(var, types::I64);
+            let var = translator.builder.declare_var(types::I64);
             translator.builder.def_var(var, val);
             translator.variables.insert(param.id, var);
         }
@@ -167,3 +211,4 @@ impl Codegen {
         product.emit().unwrap()
     }
 }
+

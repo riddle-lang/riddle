@@ -1,5 +1,6 @@
+use crate::codegen::mangle;
 use crate::hir::expr::{HirExprKind, HirLiteral};
-use crate::hir::id::{DefId, ExprId, LocalId, StmtId};
+use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId};
 use crate::hir::items::HirItem;
 use crate::hir::module::HirModule;
 use crate::hir::stmt::HirStmtKind;
@@ -11,7 +12,8 @@ use std::collections::HashMap;
 pub struct FunctionTranslator<'a> {
     pub(crate) builder: FunctionBuilder<'a>,
     pub(crate) module: &'a mut ObjectModule,
-    pub(crate) fn_ids: &'a HashMap<DefId, FuncId>,
+    pub(crate) fn_ids: &'a mut HashMap<(DefId, Vec<TyId>), FuncId>,
+    pub(crate) specialization_queue: &'a mut Vec<(DefId, Vec<TyId>)>,
     pub(crate) variables: HashMap<LocalId, Variable>,
     pub(crate) hir: &'a HirModule,
 }
@@ -24,8 +26,7 @@ impl<'a> FunctionTranslator<'a> {
                 self.translate_expr(*expr);
             }
             HirStmtKind::Let { init, id, .. } => {
-                let var = Variable::new(id.0);
-                self.builder.declare_var(var, types::I64);
+                let var = self.builder.declare_var(types::I64);
                 if let Some(init_expr) = init {
                     let val = self.translate_expr(*init_expr);
                     self.builder.def_var(var, val);
@@ -79,7 +80,7 @@ impl<'a> FunctionTranslator<'a> {
                     _ => unimplemented!("Operator {} not supported", op),
                 }
             }
-            HirExprKind::Symbol { name, id } => {
+            HirExprKind::Symbol { name, id, .. } => {
                 if let Some(local_id) = id {
                     if let Some(var) = self.variables.get(local_id) {
                         self.builder.use_var(*var)
@@ -99,10 +100,16 @@ impl<'a> FunctionTranslator<'a> {
                 }
 
                 match &callee_expr.kind {
-                    HirExprKind::Symbol { name, .. } => self.resolve_fn_call(name, &arg_vals),
+                    HirExprKind::Symbol { name, def_id, .. } => {
+                        if let Some(did) = def_id {
+                            self.call_by_id(*did, &arg_vals, callee_expr.ty)
+                        } else {
+                            self.resolve_fn_call(name, &arg_vals)
+                        }
+                    }
                     HirExprKind::MemberAccess { member, id, .. } => {
                         if let Some(def_id) = id {
-                            self.call_by_id(*def_id, &arg_vals)
+                            self.call_by_id(*def_id, &arg_vals, callee_expr.ty)
                         } else {
                             self.resolve_fn_call(member, &arg_vals)
                         }
@@ -135,7 +142,12 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn call_by_id(&mut self, def_id: DefId, args: &[Value]) -> Value {
+    fn call_by_id(
+        &mut self,
+        def_id: DefId,
+        args: &[Value],
+        instantiated_ty: Option<TyId>,
+    ) -> Value {
         let item = &self.hir.items[def_id.0];
         if let HirItem::ExternFunc(f) = item {
             if f.is_variadic {
@@ -143,7 +155,44 @@ impl<'a> FunctionTranslator<'a> {
             }
         }
 
-        let fn_id = self.fn_ids[&def_id];
+        let generic_args = if let Some(ty) = instantiated_ty {
+            self.extract_generic_args(def_id, ty)
+        } else {
+            vec![]
+        };
+
+        let key = (def_id, generic_args.clone());
+        if !self.fn_ids.contains_key(&key) {
+            let name = match &self.hir.items[def_id.0] {
+                HirItem::Func(f) => mangle(&f.name, &generic_args),
+                HirItem::Enum(e) => mangle(&e.name, &generic_args),
+                HirItem::Struct(s) => mangle(&s.name, &generic_args),
+                _ => unreachable!(),
+            };
+
+            let mut sig = self.module.make_signature();
+            let ty_id = self.hir.item_types[&def_id];
+            let param_count = match &self.hir.types[ty_id.0] {
+                crate::hir::types::HirType::Func(sig_types, _) => sig_types.len() - 1,
+                _ => 0,
+            };
+
+            for _ in 0..param_count {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+
+            let fn_id = self
+                .module
+                .declare_function(&name, Linkage::Export, &sig)
+                .unwrap();
+            self.fn_ids.insert(key.clone(), fn_id);
+            if matches!(&self.hir.items[def_id.0], HirItem::Func(_)) {
+                self.specialization_queue.push(key);
+            }
+        }
+
+        let fn_id = self.fn_ids[&(def_id, generic_args)];
         let local_func = self
             .module
             .declare_func_in_func(fn_id, &mut self.builder.func);
@@ -151,9 +200,66 @@ impl<'a> FunctionTranslator<'a> {
         self.builder.inst_results(call)[0]
     }
 
+    fn extract_generic_args(
+        &self,
+        def_id: DefId,
+        instantiated_ty: TyId,
+    ) -> Vec<TyId> {
+        let ty = &self.hir.types[instantiated_ty.0];
+        match ty {
+            crate::hir::types::HirType::Struct(_, args) => return args.clone(),
+            crate::hir::types::HirType::Enum(_, args) => return args.clone(),
+            _ => {}
+        }
+
+        let orig_ty_id = match self.hir.item_types.get(&def_id) {
+            Some(id) => *id,
+            None => return vec![],
+        };
+        let mut args = Vec::new();
+
+        let item = &self.hir.items[def_id.0];
+        let generic_params = match item {
+            HirItem::Func(f) => &f.generic_params,
+            _ => return vec![],
+        };
+
+        if generic_params.is_empty() {
+            return vec![];
+        }
+
+        if let (
+            crate::hir::types::HirType::Func(orig_sig, _),
+            crate::hir::types::HirType::Func(inst_sig, _),
+        ) = (&self.hir.types[orig_ty_id.0], ty)
+        {
+            for gp_name in generic_params {
+                let mut found = false;
+                for (i, &orig_p_id) in orig_sig.iter().enumerate() {
+                    if let crate::hir::types::HirType::GenericParam(name) =
+                        &self.hir.types[orig_p_id.0]
+                    {
+                        if name == gp_name {
+                            if i < inst_sig.len() {
+                                args.push(inst_sig[i]);
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !found {
+                    // Fallback or error
+                }
+            }
+        }
+
+        args
+    }
+
     // Handling variable length parameter functions
     fn emit_variadic_call(&mut self, def_id: DefId, args: &[Value]) -> Value {
-        let fn_id = self.fn_ids[&def_id];
+        let fn_id = self.fn_ids[&(def_id, vec![])];
         let mut sig = self.module.make_signature();
 
         let default_cc = self.module.isa().default_call_conv();
@@ -194,7 +300,7 @@ impl<'a> FunctionTranslator<'a> {
         }
 
         if let Some(def_id) = target_def_id {
-            self.call_by_id(def_id, args)
+            self.call_by_id(def_id, args, None)
         } else {
             // Check if it is an enum variant
             if name.contains("::") {

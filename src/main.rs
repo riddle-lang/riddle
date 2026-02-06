@@ -11,17 +11,28 @@ mod hir;
 
 fn main() {
     let code = r#"
+        fun ex<T>(x: T)->T{
+            return x;
+        }
         extern "C" {
             fun printf(fmt: &str, ...) -> int;
         }
 
         fun main() -> int {
             printf("hello %d", 42);
-            return printf("hello world");
+            let t = ex(1);
+            let t2 = ex("str");
+            return printf("hello world %d", t);
         }
     "#;
 
-    let ast = frontend::parser::parse(code).unwrap();
+    let ast = match frontend::parser::parse(code) {
+        Ok(ast) => ast,
+        Err(e) => {
+            eprintln!("Parse error:\n{}", e);
+            return;
+        }
+    };
 
     let mut module = HirModule::new();
 
@@ -33,13 +44,19 @@ fn main() {
         },
     );
 
-    lower.lower().unwrap();
+    if let Err(e) = lower.lower() {
+        eprintln!("Lowering error: {}", e);
+        return;
+    }
 
     let mut name_pass = NamePass::new(&mut module);
     name_pass.run();
 
     let mut type_infer = TypeInfer::new(&mut module);
-    type_infer.infer().unwrap();
+    if let Err(e) = type_infer.infer() {
+        eprintln!("Type inference error: {}", e);
+        return;
+    }
 
     // println!("{:#?}", module);
 

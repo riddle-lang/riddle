@@ -425,12 +425,14 @@ impl<'a> AstLower<'a> {
             AstNode::Identifier(name) => Ok(HirExpr::new(HirExprKind::Symbol {
                 name: name.clone(),
                 id: None,
+                def_id: None,
             })),
             AstNode::Path(parts) => {
                 let name = parts.join("::");
                 Ok(HirExpr::new(HirExprKind::Symbol {
                     name,
                     id: None,
+                    def_id: None,
                 }))
             }
             AstNode::Call { func, args } => {

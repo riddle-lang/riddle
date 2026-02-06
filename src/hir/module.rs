@@ -4,6 +4,10 @@ use crate::hir::stmt::HirStmt;
 use crate::hir::type_expr::HirTypeExpr;
 use crate::hir::types::HirType;
 
+use std::collections::HashMap;
+use crate::hir::id::DefId;
+use crate::hir::id::TyId;
+
 #[derive(Debug)]
 pub struct HirModule {
     pub items: Vec<HirItem>,
@@ -11,6 +15,7 @@ pub struct HirModule {
     pub stmts: Vec<HirStmt>,
     pub types: Vec<HirType>,
     pub type_exprs: Vec<HirTypeExpr>,
+    pub item_types: HashMap<DefId, TyId>,
     pub next_local_id: usize,
 }
 
@@ -22,6 +27,7 @@ impl HirModule {
             stmts: vec![],
             types: vec![],
             type_exprs: vec![],
+            item_types: HashMap::new(),
             next_local_id: 0,
         }
     }

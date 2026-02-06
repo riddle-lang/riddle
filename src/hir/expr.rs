@@ -23,6 +23,7 @@ pub enum HirExprKind {
     Symbol {
         name: String,
         id: Option<LocalId>,
+        def_id: Option<DefId>,
     },
     Call {
         callee: ExprId,
