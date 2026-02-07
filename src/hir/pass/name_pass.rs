@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use crate::hir::id::LocalId;
-use crate::hir::module::HirModule;
-use crate::hir::items::HirItem;
-use crate::hir::stmt::HirStmtKind;
+use crate::error::{Result, RiddleError};
 use crate::hir::expr::HirExprKind;
+use crate::hir::id::LocalId;
 use crate::hir::id::{ExprId, StmtId};
-use crate::error::{RiddleError, Result};
+use crate::hir::items::HirItem;
+use crate::hir::module::HirModule;
+use crate::hir::stmt::HirStmtKind;
+use std::collections::HashMap;
 
 pub struct NamePass<'a> {
     module: &'a mut HirModule,
@@ -31,7 +31,10 @@ impl<'a> NamePass<'a> {
     fn define(&mut self, name: String, id: LocalId) -> Result<()> {
         if let Some(scope) = self.scopes.last_mut() {
             if scope.contains_key(&name) {
-                return Err(RiddleError::Name(format!("Variable '{}' already defined in this scope", name), None));
+                return Err(RiddleError::Name(
+                    format!("Variable '{}' already defined in this scope", name),
+                    None,
+                ));
             }
             scope.insert(name, id);
         }
@@ -71,7 +74,7 @@ impl<'a> NamePass<'a> {
 
     fn process_func(&mut self, func_idx: usize) -> Result<()> {
         self.push_scope();
-        
+
         let (params, body_stmts) = if let HirItem::Func(func) = &self.module.items[func_idx] {
             (func.param.clone(), func.body.clone())
         } else {
@@ -102,6 +105,17 @@ impl<'a> NamePass<'a> {
             HirStmtKind::Expr { expr, .. } => {
                 self.process_expr(expr)?;
             }
+            HirStmtKind::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                self.process_expr(cond)?;
+                self.process_stmt(then_block)?;
+                if let Some(eb) = else_block {
+                    self.process_stmt(eb)?;
+                }
+            }
             HirStmtKind::Return { value } => {
                 if let Some(expr) = value {
                     self.process_expr(expr)?;
@@ -118,9 +132,14 @@ impl<'a> NamePass<'a> {
                 self.process_expr(lhs)?;
                 self.process_expr(rhs)?;
             }
+            HirExprKind::UnaryOp { expr, .. } => {
+                self.process_expr(expr)?;
+            }
             HirExprKind::Symbol { ref name, .. } => {
                 if let Some(id) = self.resolve(name) {
-                    if let HirExprKind::Symbol { id: sym_id, .. } = &mut self.module.exprs[expr_id.0].kind {
+                    if let HirExprKind::Symbol { id: sym_id, .. } =
+                        &mut self.module.exprs[expr_id.0].kind
+                    {
                         *sym_id = Some(id);
                     }
                 }
@@ -149,6 +168,13 @@ impl<'a> NamePass<'a> {
             }
             HirExprKind::MemberAccess { object, .. } => {
                 self.process_expr(object)?;
+            }
+            HirExprKind::Cast { expr, .. } => {
+                self.process_expr(expr)?;
+            }
+            HirExprKind::IndexAccess { object, index } => {
+                self.process_expr(object)?;
+                self.process_expr(index)?;
             }
             _ => {}
         }

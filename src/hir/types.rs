@@ -10,13 +10,16 @@ pub enum HirType {
     Bool,
     Unit,
     Str,
-    Ref(TyId),
+    CInt,
+    CStr,
     /// ret, param*, is_variadic
     Func(Vec<TyId>, bool),
     /// DefId of the struct, Generic arguments
     Struct(crate::hir::id::DefId, Vec<TyId>),
     /// DefId of the enum, Generic arguments
     Enum(crate::hir::id::DefId, Vec<TyId>),
+    Pointer(TyId),
+    Array(TyId, usize),
     GenericParam(String),
     /// For bidirectional type checking / inference
     Infer(InferTy),

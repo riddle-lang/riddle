@@ -1,5 +1,5 @@
-use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyExprId};
 use crate::error::Span;
+use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyExprId};
 
 #[derive(Debug, Clone)]
 pub enum HirItem {

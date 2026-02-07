@@ -1,5 +1,5 @@
-use crate::hir::id::{TyExprId, TyId};
 use crate::error::Span;
+use crate::hir::id::{TyExprId, TyId};
 
 #[derive(Debug, Clone)]
 pub struct HirTypeExpr {
@@ -23,7 +23,8 @@ pub enum HirTypeExprKind {
     /// named type like `int`
     Unit,
     Path(String),
+    Pointer(TyExprId),
+    Array(TyExprId, usize),
     Generic(String, Vec<TyExprId>),
     Func(Vec<TyExprId>, TyExprId),
-    Ref(TyExprId),
 }

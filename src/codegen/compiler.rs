@@ -15,6 +15,8 @@ pub struct Codegen {
     module: ObjectModule,
     fn_ids: HashMap<(DefId, Vec<TyId>), FuncId>,
     queue: Vec<(DefId, Vec<TyId>)>,
+    gc_alloc_id: Option<FuncId>,
+    gc_init_id: Option<FuncId>,
 }
 
 impl Codegen {
@@ -32,13 +34,29 @@ impl Codegen {
             cranelift_module::default_libcall_names(),
         )
         .unwrap();
-        let module = ObjectModule::new(builder);
+        let mut module = ObjectModule::new(builder);
+
+        // Declare GC functions
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // size
+        sig.returns.push(AbiParam::new(types::I64)); // pointer
+        let gc_alloc_id = module
+            .declare_function("riddle_gc_alloc", Linkage::Import, &sig)
+            .unwrap();
+
+        let init_sig = module.make_signature();
+        let gc_init_id = module
+            .declare_function("riddle_gc_init", Linkage::Import, &init_sig)
+            .unwrap();
+
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
             module,
             fn_ids: HashMap::new(),
             queue: vec![],
+            gc_alloc_id: Some(gc_alloc_id),
+            gc_init_id: Some(gc_init_id),
         }
     }
 
@@ -70,12 +88,7 @@ impl Codegen {
         }
     }
 
-    fn get_or_declare_fn(
-        &mut self,
-        def_id: DefId,
-        args: Vec<TyId>,
-        hir: &HirModule,
-    ) -> FuncId {
+    fn get_or_declare_fn(&mut self, def_id: DefId, args: Vec<TyId>, hir: &HirModule) -> FuncId {
         if let Some(&fn_id) = self.fn_ids.get(&(def_id, args.clone())) {
             return fn_id;
         }
@@ -108,10 +121,7 @@ impl Codegen {
         } else {
             Linkage::Export
         };
-        let fn_id = self
-            .module
-            .declare_function(&name, linkage, &sig)
-            .unwrap();
+        let fn_id = self.module.declare_function(&name, linkage, &sig).unwrap();
 
         self.fn_ids.insert((def_id, args.clone()), fn_id);
         if !is_extern {
@@ -150,12 +160,7 @@ impl Codegen {
         );
     }
 
-    fn compile_func(
-        &mut self,
-        func: &HirFunc,
-        generic_args: &[TyId],
-        hir: &HirModule,
-    ) {
+    fn compile_func(&mut self, func: &HirFunc, generic_args: &[TyId], hir: &HirModule) {
         let fn_id = self.fn_ids[&(func.id, generic_args.to_vec())];
 
         let mut sig = self.module.make_signature();
@@ -178,6 +183,7 @@ impl Codegen {
         let pretty = mangle(&func.name, generic_args);
         builder.func.name = UserFuncName::testcase(pretty);
 
+        let gc_init_id = self.gc_init_id;
         let mut translator = FunctionTranslator {
             builder,
             module: &mut self.module,
@@ -185,7 +191,15 @@ impl Codegen {
             specialization_queue: &mut self.queue,
             variables: HashMap::new(),
             hir,
+            gc_alloc_id: self.gc_alloc_id,
         };
+
+        if func.name == "main" && gc_init_id.is_some() {
+            let gc_init_func = translator
+                .module
+                .declare_func_in_func(gc_init_id.unwrap(), &mut translator.builder.func);
+            translator.builder.ins().call(gc_init_func, &[]);
+        }
 
         for (i, param) in func.param.iter().enumerate() {
             let val = translator.builder.block_params(entry_block)[i];
@@ -211,4 +225,3 @@ impl Codegen {
         product.emit().unwrap()
     }
 }
-

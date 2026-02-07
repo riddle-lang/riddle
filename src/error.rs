@@ -21,8 +21,12 @@ pub enum RiddleError {
 impl RiddleError {
     pub fn report(&self, source: &str) {
         match self {
-            RiddleError::Parse(msg, span) => self.print_diagnostic("Parse error", msg, *span, source),
-            RiddleError::Lowering(msg, span) => self.print_diagnostic("Lowering error", msg, *span, source),
+            RiddleError::Parse(msg, span) => {
+                self.print_diagnostic("Parse error", msg, *span, source)
+            }
+            RiddleError::Lowering(msg, span) => {
+                self.print_diagnostic("Lowering error", msg, *span, source)
+            }
             RiddleError::Name(msg, span) => self.print_diagnostic("Name error", msg, *span, source),
             RiddleError::Type(msg, span) => self.print_diagnostic("Type error", msg, *span, source),
         }
@@ -38,7 +42,11 @@ impl RiddleError {
             let (end_line, end_col) = self.offset_to_line_col(source, span.end);
 
             eprintln!("{red}{kind}{reset}: {msg}");
-            eprintln!("{blue}  -->{reset} input:{}:{}", start_line + 1, start_col + 1);
+            eprintln!(
+                "{blue}  -->{reset} input:{}:{}",
+                start_line + 1,
+                start_col + 1
+            );
 
             let lines: Vec<&str> = source.lines().collect();
             let padding = (end_line + 1).to_string().len();
@@ -50,7 +58,11 @@ impl RiddleError {
                     break;
                 }
                 let line_text = lines[i];
-                eprintln!("{blue}{:>width$} |{reset} {line_text}", i + 1, width = padding);
+                eprintln!(
+                    "{blue}{:>width$} |{reset} {line_text}",
+                    i + 1,
+                    width = padding
+                );
 
                 let mut marker = String::new();
                 if start_line == end_line {
@@ -82,9 +94,13 @@ impl RiddleError {
                         marker.push('^');
                     }
                 }
-                
+
                 if !marker.trim().is_empty() || i == start_line {
-                    eprintln!("{blue}{:>width$} |{reset} {red}{marker}{reset}", "", width = padding);
+                    eprintln!(
+                        "{blue}{:>width$} |{reset} {red}{marker}{reset}",
+                        "",
+                        width = padding
+                    );
                 }
             }
             eprintln!("{blue}{:>width$} |{reset}", "", width = padding);

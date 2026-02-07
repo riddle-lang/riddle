@@ -1,3 +1,4 @@
+use crate::error::Span;
 use crate::hir::expr::HirExpr;
 use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyExprId, TyId};
 use crate::hir::items::{
@@ -8,12 +9,11 @@ use crate::hir::module::HirModule;
 use crate::hir::stmt::{HirStmt, HirStmtKind};
 use crate::hir::type_expr::HirTypeExpr;
 use crate::hir::types::HirType;
-use crate::error::Span;
 
 #[derive(Debug)]
 pub struct HirBuilder<'a> {
     pub module: &'a mut HirModule,
-    active_func: Option<DefId>,
+    pub active_func: Option<DefId>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -28,6 +28,17 @@ impl Into<String> for HirBuilderError {
 }
 
 impl<'a> HirBuilder<'a> {
+    pub fn add_stmt(&mut self, stmt: HirStmt) -> StmtId {
+        let id = StmtId(self.module.stmts.len());
+        self.module.stmts.push(stmt);
+        if let Some(fid) = self.active_func {
+            if let HirItem::Func(f) = &mut self.module.items[fid.0] {
+                f.body.push(id);
+            }
+        }
+        id
+    }
+
     pub fn new(module: &'a mut HirModule) -> Self {
         Self {
             module,
@@ -214,7 +225,10 @@ impl<'a> HirBuilder<'a> {
         let func_id = self
             .active_func
             .ok_or(HirBuilderError::CurrentFunctionNotSet)?;
-        let stmt_id = self.create_stmt(HirStmt::new(HirStmtKind::Return { value: Some(expr) }, span));
+        let stmt_id = self.create_stmt(HirStmt::new(
+            HirStmtKind::Return { value: Some(expr) },
+            span,
+        ));
         if let HirItem::Func(func) = &mut self.module.items[func_id.0] {
             func.body.push(stmt_id);
         }
@@ -247,7 +261,12 @@ impl<'a> HirBuilder<'a> {
         Ok(())
     }
 
-    pub fn expr_stmt(&mut self, expr: ExprId, has_semi: bool, span: Span) -> Result<(), HirBuilderError> {
+    pub fn expr_stmt(
+        &mut self,
+        expr: ExprId,
+        has_semi: bool,
+        span: Span,
+    ) -> Result<(), HirBuilderError> {
         let func_id = self
             .active_func
             .ok_or(HirBuilderError::CurrentFunctionNotSet)?;

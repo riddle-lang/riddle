@@ -1,5 +1,5 @@
-use crate::hir::id::{ExprId, LocalId, TyExprId};
 use crate::error::Span;
+use crate::hir::id::{ExprId, LocalId, StmtId, TyExprId};
 
 #[derive(Debug, Clone)]
 pub struct HirStmt {
@@ -29,5 +29,10 @@ pub enum HirStmtKind {
     },
     Return {
         value: Option<ExprId>,
+    },
+    If {
+        cond: ExprId,
+        then_block: StmtId,
+        else_block: Option<StmtId>,
     },
 }

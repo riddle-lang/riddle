@@ -1,10 +1,10 @@
+use crate::error::{Result, RiddleError, Span};
 use crate::frontend::ast::{
     AstNode, AstNodeKind, EnumVariant, ExternFunc, FuncParam, Literal, StructField, TraitItem,
 };
-use pest::Parser;
 use pest::iterators::Pair;
+use pest::Parser;
 use pest_derive::Parser;
-use crate::error::{RiddleError, Result, Span};
 
 #[derive(Parser)]
 #[grammar = "grammar.pest"]
@@ -13,7 +13,12 @@ struct RiddleParser;
 pub fn parse(input: &str) -> Result<AstNode> {
     let pairs = RiddleParser::parse(Rule::program, input)
         .map_err(|e| RiddleError::Parse(format!("{}", e), None))?;
-    parse_pair(pairs.into_iter().next().ok_or_else(|| RiddleError::Parse("Empty program".to_string(), None))?)
+    parse_pair(
+        pairs
+            .into_iter()
+            .next()
+            .ok_or_else(|| RiddleError::Parse("Empty program".to_string(), None))?,
+    )
 }
 
 fn get_span(pair: &Pair<Rule>) -> Span {
@@ -25,7 +30,11 @@ fn get_span(pair: &Pair<Rule>) -> Span {
 
 fn parse_extern_item(pair: Pair<Rule>) -> Result<ExternFunc> {
     let mut inner = pair.into_inner();
-    let name = inner.next().ok_or_else(|| RiddleError::Parse("Extern item missing name".to_string(), None))?.as_str().to_string();
+    let name = inner
+        .next()
+        .ok_or_else(|| RiddleError::Parse("Extern item missing name".to_string(), None))?
+        .as_str()
+        .to_string();
     let mut params = Vec::new();
     let mut return_type = None;
     let mut is_variadic = false;
@@ -33,8 +42,15 @@ fn parse_extern_item(pair: Pair<Rule>) -> Result<ExternFunc> {
         match p.as_rule() {
             Rule::func_param => {
                 let mut p_inner = p.into_inner();
-                let p_name = p_inner.next().ok_or_else(|| RiddleError::Parse("Param missing name".to_string(), None))?.as_str().to_string();
-                let p_type = Box::new(parse_pair(p_inner.next().ok_or_else(|| RiddleError::Parse("Param missing type".to_string(), None))?)?);
+                let p_name = p_inner
+                    .next()
+                    .ok_or_else(|| RiddleError::Parse("Param missing name".to_string(), None))?
+                    .as_str()
+                    .to_string();
+                let p_type =
+                    Box::new(parse_pair(p_inner.next().ok_or_else(|| {
+                        RiddleError::Parse("Param missing type".to_string(), None)
+                    })?)?);
                 params.push(FuncParam {
                     name: p_name,
                     type_expr: p_type,
@@ -43,9 +59,7 @@ fn parse_extern_item(pair: Pair<Rule>) -> Result<ExternFunc> {
             Rule::variadic_marker => {
                 is_variadic = true;
             }
-            Rule::type_expr => {
-                return_type = Some(Box::new(parse_pair(p)?))
-            }
+            Rule::type_expr => return_type = Some(Box::new(parse_pair(p)?)),
             _ => unreachable!(),
         }
     }
@@ -58,13 +72,13 @@ fn parse_extern_item(pair: Pair<Rule>) -> Result<ExternFunc> {
 }
 
 fn parse_generic_params(pair: Pair<Rule>) -> Vec<String> {
-    pair.into_inner()
-        .map(|p| p.as_str().to_string())
-        .collect()
+    pair.into_inner().map(|p| p.as_str().to_string()).collect()
 }
 
 fn parse_generic_args(pair: Pair<Rule>) -> Result<Vec<AstNode>> {
-    pair.into_inner().map(parse_pair).collect::<Result<Vec<_>>>()
+    pair.into_inner()
+        .map(parse_pair)
+        .collect::<Result<Vec<_>>>()
 }
 
 fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
@@ -85,12 +99,8 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
             for p in pair.into_inner() {
                 match p.as_rule() {
                     Rule::identifier => name = p.as_str().to_string(),
-                    Rule::type_expr => {
-                        type_expr = Some(Box::new(parse_pair(p)?))
-                    }
-                    Rule::value_expr => {
-                        value = Some(Box::new(parse_pair(p)?))
-                    }
+                    Rule::type_expr => type_expr = Some(Box::new(parse_pair(p)?)),
+                    Rule::value_expr => value = Some(Box::new(parse_pair(p)?)),
                     _ => unreachable!(),
                 }
             }
@@ -102,7 +112,11 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
         }
         Rule::func_decl => {
             let mut inner = pair.into_inner();
-            let name = inner.next().ok_or_else(|| RiddleError::Parse("Function missing name".to_string(), Some(span)))?.as_str().to_string();
+            let name = inner
+                .next()
+                .ok_or_else(|| RiddleError::Parse("Function missing name".to_string(), Some(span)))?
+                .as_str()
+                .to_string();
             let mut generic_params = Vec::new();
             let mut params = Vec::new();
             let mut return_type = None;
@@ -113,16 +127,25 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                     Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::func_param => {
                         let mut p_inner = p.clone().into_inner();
-                        let p_name = p_inner.next().ok_or_else(|| RiddleError::Parse("Param missing name".to_string(), Some(get_span(&p))))?.as_str().to_string();
-                        let p_type = Box::new(parse_pair(p_inner.next().ok_or_else(|| RiddleError::Parse("Param missing type".to_string(), Some(get_span(&p))))?)?);
+                        let p_name = p_inner
+                            .next()
+                            .ok_or_else(|| {
+                                RiddleError::Parse(
+                                    "Param missing name".to_string(),
+                                    Some(get_span(&p)),
+                                )
+                            })?
+                            .as_str()
+                            .to_string();
+                        let p_type = Box::new(parse_pair(p_inner.next().ok_or_else(|| {
+                            RiddleError::Parse("Param missing type".to_string(), Some(get_span(&p)))
+                        })?)?);
                         params.push(FuncParam {
                             name: p_name,
                             type_expr: p_type,
                         });
                     }
-                    Rule::type_expr => {
-                        return_type = Some(Box::new(parse_pair(p)?))
-                    }
+                    Rule::type_expr => return_type = Some(Box::new(parse_pair(p)?)),
                     Rule::block => body = Some(Box::new(parse_pair(p)?)),
                     _ => unreachable!(),
                 }
@@ -133,12 +156,18 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                 generic_params,
                 params,
                 return_type,
-                body: body.ok_or_else(|| RiddleError::Parse(format!("Function {} missing body", func_name), Some(span)))?,
+                body: body.ok_or_else(|| {
+                    RiddleError::Parse(format!("Function {} missing body", func_name), Some(span))
+                })?,
             }
         }
         Rule::struct_decl => {
             let mut inner = pair.into_inner();
-            let name = inner.next().ok_or_else(|| RiddleError::Parse("Struct missing name".to_string(), Some(span)))?.as_str().to_string();
+            let name = inner
+                .next()
+                .ok_or_else(|| RiddleError::Parse("Struct missing name".to_string(), Some(span)))?
+                .as_str()
+                .to_string();
             let mut generic_params = Vec::new();
             let mut fields = Vec::new();
             for p in inner {
@@ -146,8 +175,19 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                     Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::struct_field => {
                         let mut f_inner = p.clone().into_inner();
-                        let f_name = f_inner.next().ok_or_else(|| RiddleError::Parse("Field missing name".to_string(), Some(get_span(&p))))?.as_str().to_string();
-                        let f_type = Box::new(parse_pair(f_inner.next().ok_or_else(|| RiddleError::Parse("Field missing type".to_string(), Some(get_span(&p))))?)?);
+                        let f_name = f_inner
+                            .next()
+                            .ok_or_else(|| {
+                                RiddleError::Parse(
+                                    "Field missing name".to_string(),
+                                    Some(get_span(&p)),
+                                )
+                            })?
+                            .as_str()
+                            .to_string();
+                        let f_type = Box::new(parse_pair(f_inner.next().ok_or_else(|| {
+                            RiddleError::Parse("Field missing type".to_string(), Some(get_span(&p)))
+                        })?)?);
                         fields.push(StructField {
                             name: f_name,
                             type_expr: f_type,
@@ -164,7 +204,11 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
         }
         Rule::enum_decl => {
             let mut inner = pair.into_inner();
-            let name = inner.next().ok_or_else(|| RiddleError::Parse("Enum missing name".to_string(), Some(span)))?.as_str().to_string();
+            let name = inner
+                .next()
+                .ok_or_else(|| RiddleError::Parse("Enum missing name".to_string(), Some(span)))?
+                .as_str()
+                .to_string();
             let mut generic_params = Vec::new();
             let mut variants = Vec::new();
             for p in inner {
@@ -172,11 +216,23 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                     Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::enum_variant => {
                         let mut v_inner = p.clone().into_inner();
-                        let v_name = v_inner.next().ok_or_else(|| RiddleError::Parse("Variant missing name".to_string(), Some(get_span(&p))))?.as_str().to_string();
+                        let v_name = v_inner
+                            .next()
+                            .ok_or_else(|| {
+                                RiddleError::Parse(
+                                    "Variant missing name".to_string(),
+                                    Some(get_span(&p)),
+                                )
+                            })?
+                            .as_str()
+                            .to_string();
                         if let Some(suffix) = v_inner.next() {
                             match suffix.as_rule() {
                                 Rule::enum_tuple => {
-                                    let args = suffix.into_inner().map(parse_pair).collect::<Result<Vec<_>>>()?;
+                                    let args = suffix
+                                        .into_inner()
+                                        .map(parse_pair)
+                                        .collect::<Result<Vec<_>>>()?;
                                     variants.push(EnumVariant::Tuple(v_name, args));
                                 }
                                 Rule::enum_struct => {
@@ -184,9 +240,24 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                                         .into_inner()
                                         .map(|f| {
                                             let mut f_inner = f.clone().into_inner();
-                                            let f_name =
-                                                f_inner.next().ok_or_else(|| RiddleError::Parse("Field missing name".to_string(), Some(get_span(&f))))?.as_str().to_string();
-                                            let f_type = Box::new(parse_pair(f_inner.next().ok_or_else(|| RiddleError::Parse("Field missing type".to_string(), Some(get_span(&f))))?)?);
+                                            let f_name = f_inner
+                                                .next()
+                                                .ok_or_else(|| {
+                                                    RiddleError::Parse(
+                                                        "Field missing name".to_string(),
+                                                        Some(get_span(&f)),
+                                                    )
+                                                })?
+                                                .as_str()
+                                                .to_string();
+                                            let f_type = Box::new(parse_pair(
+                                                f_inner.next().ok_or_else(|| {
+                                                    RiddleError::Parse(
+                                                        "Field missing type".to_string(),
+                                                        Some(get_span(&f)),
+                                                    )
+                                                })?,
+                                            )?);
                                             Ok(StructField {
                                                 name: f_name,
                                                 type_expr: f_type,
@@ -212,7 +283,11 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
         }
         Rule::trait_decl => {
             let mut inner = pair.into_inner();
-            let name = inner.next().ok_or_else(|| RiddleError::Parse("Trait missing name".to_string(), Some(span)))?.as_str().to_string();
+            let name = inner
+                .next()
+                .ok_or_else(|| RiddleError::Parse("Trait missing name".to_string(), Some(span)))?
+                .as_str()
+                .to_string();
             let mut generic_params = Vec::new();
             let mut items = Vec::new();
             for p in inner {
@@ -220,7 +295,16 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                     Rule::generic_params => generic_params = parse_generic_params(p),
                     Rule::trait_item => {
                         let mut item_inner = p.clone().into_inner();
-                        let item_name = item_inner.next().ok_or_else(|| RiddleError::Parse("Trait item missing name".to_string(), Some(get_span(&p))))?.as_str().to_string();
+                        let item_name = item_inner
+                            .next()
+                            .ok_or_else(|| {
+                                RiddleError::Parse(
+                                    "Trait item missing name".to_string(),
+                                    Some(get_span(&p)),
+                                )
+                            })?
+                            .as_str()
+                            .to_string();
                         let mut item_generic_params = Vec::new();
                         let mut params = Vec::new();
                         let mut return_type = None;
@@ -231,8 +315,23 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                                 }
                                 Rule::func_param => {
                                     let mut p_inner = param_p.clone().into_inner();
-                                    let p_name = p_inner.next().ok_or_else(|| RiddleError::Parse("Param missing name".to_string(), Some(get_span(&param_p))))?.as_str().to_string();
-                                    let p_type = Box::new(parse_pair(p_inner.next().ok_or_else(|| RiddleError::Parse("Param missing type".to_string(), Some(get_span(&param_p))))?)?);
+                                    let p_name = p_inner
+                                        .next()
+                                        .ok_or_else(|| {
+                                            RiddleError::Parse(
+                                                "Param missing name".to_string(),
+                                                Some(get_span(&param_p)),
+                                            )
+                                        })?
+                                        .as_str()
+                                        .to_string();
+                                    let p_type =
+                                        Box::new(parse_pair(p_inner.next().ok_or_else(|| {
+                                            RiddleError::Parse(
+                                                "Param missing type".to_string(),
+                                                Some(get_span(&param_p)),
+                                            )
+                                        })?)?);
                                     params.push(FuncParam {
                                         name: p_name,
                                         type_expr: p_type,
@@ -286,7 +385,12 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
             let (trait_type, target_type) = if let Some(target) = second_type {
                 (first_type.map(Box::new), Box::new(target))
             } else {
-                (None, Box::new(first_type.ok_or_else(|| RiddleError::Parse("Impl missing target type".to_string(), Some(span)))?))
+                (
+                    None,
+                    Box::new(first_type.ok_or_else(|| {
+                        RiddleError::Parse("Impl missing target type".to_string(), Some(span))
+                    })?),
+                )
             };
 
             AstNodeKind::ImplDecl {
@@ -330,7 +434,9 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
             }
             AstNodeKind::ExternDecl {
                 abi,
-                function: function.ok_or_else(|| RiddleError::Parse("Extern decl missing function".to_string(), Some(span)))?,
+                function: function.ok_or_else(|| {
+                    RiddleError::Parse("Extern decl missing function".to_string(), Some(span))
+                })?,
             }
         }
         Rule::block => {
@@ -338,7 +444,7 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
             let mut statements = Vec::new();
             let mut final_expr = None;
             while let Some(p) = inner.next() {
-                if p.as_rule() == Rule::binary_expr && inner.peek().is_none() {
+                if p.as_rule() == Rule::assign_expr && inner.peek().is_none() {
                     final_expr = Some(Box::new(parse_pair(p)?));
                 } else {
                     statements.push(parse_pair(p)?);
@@ -350,15 +456,26 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
             }
         }
         Rule::return_stmt => {
-            AstNodeKind::Return(Box::new(parse_pair(pair.into_inner().next().ok_or_else(|| RiddleError::Parse("Return missing value".to_string(), Some(span)))?)?))
+            AstNodeKind::Return(Box::new(parse_pair(pair.into_inner().next().ok_or_else(
+                || RiddleError::Parse("Return missing value".to_string(), Some(span)),
+            )?)?))
         }
-        Rule::expr_stmt => return parse_pair(pair.into_inner().next().ok_or_else(|| RiddleError::Parse("Empty expression statement".to_string(), Some(span)))?),
-        Rule::binary_expr => {
+        Rule::expr_stmt => {
+            return parse_pair(pair.into_inner().next().ok_or_else(|| {
+                RiddleError::Parse("Empty expression statement".to_string(), Some(span))
+            })?);
+        }
+        Rule::assign_expr | Rule::compare_expr | Rule::add_expr | Rule::mul_expr => {
             let mut inner = pair.into_inner();
-            let mut lhs = parse_pair(inner.next().ok_or_else(|| RiddleError::Parse("Binary expression missing LHS".to_string(), Some(span)))?)?;
+            let mut lhs = parse_pair(inner.next().ok_or_else(|| {
+                RiddleError::Parse("Binary expression missing LHS".to_string(), Some(span))
+            })?)?;
+
             while let Some(op_pair) = inner.next() {
-                let op = op_pair.as_str().to_string();
-                let rhs = parse_pair(inner.next().ok_or_else(|| RiddleError::Parse("Binary expression missing RHS".to_string(), Some(span)))?)?;
+                let op = op_pair.as_str().trim().to_string();
+                let rhs = parse_pair(inner.next().ok_or_else(|| {
+                    RiddleError::Parse("Binary expression missing RHS".to_string(), Some(span))
+                })?)?;
                 let new_span = Span {
                     start: lhs.span.start,
                     end: rhs.span.end,
@@ -374,9 +491,67 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
             }
             return Ok(lhs);
         }
+        Rule::unary_expr => {
+            let mut inner = pair.into_inner();
+            let mut ops = Vec::new();
+            let mut last_pair = None;
+            for p in inner {
+                if p.as_rule() == Rule::unary_op {
+                    ops.push(p);
+                } else {
+                    last_pair = Some(p);
+                    break;
+                }
+            }
+
+            let mut expr = parse_pair(last_pair.ok_or_else(|| {
+                RiddleError::Parse("Unary expression missing base".to_string(), Some(span))
+            })?)?;
+
+            for op_pair in ops.into_iter().rev() {
+                let op = op_pair.as_str().trim().to_string();
+                let op_span = get_span(&op_pair);
+                let new_span = Span {
+                    start: op_span.start,
+                    end: expr.span.end,
+                };
+                expr = AstNode {
+                    kind: AstNodeKind::UnaryExpr {
+                        op,
+                        expr: Box::new(expr),
+                    },
+                    span: new_span,
+                };
+            }
+            return Ok(expr);
+        }
+        Rule::cast_expr => {
+            let mut inner = pair.into_inner();
+            let mut expr = parse_pair(inner.next().ok_or_else(|| {
+                RiddleError::Parse("Cast expression missing base".to_string(), Some(span))
+            })?)?;
+
+            while let Some(target_type_pair) = inner.next() {
+                let target_type = parse_pair(target_type_pair)?;
+                let new_span = Span {
+                    start: expr.span.start,
+                    end: target_type.span.end,
+                };
+                expr = AstNode {
+                    kind: AstNodeKind::CastExpr {
+                        expr: Box::new(expr),
+                        target_type: Box::new(target_type),
+                    },
+                    span: new_span,
+                };
+            }
+            return Ok(expr);
+        }
         Rule::postfix_expr => {
             let mut inner = pair.into_inner();
-            let mut expr = parse_pair(inner.next().ok_or_else(|| RiddleError::Parse("Postfix expression missing base".to_string(), Some(span)))?)?;
+            let mut expr = parse_pair(inner.next().ok_or_else(|| {
+                RiddleError::Parse("Postfix expression missing base".to_string(), Some(span))
+            })?)?;
 
             for p in inner {
                 let p_span = get_span(&p);
@@ -395,32 +570,18 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                             span: new_span,
                         };
                     }
-                    Rule::struct_inst => {
-                        let mut fields = Vec::new();
-                        for f in p.into_inner() {
-                            if f.as_rule() == Rule::struct_inst_field {
-                                let mut f_inner = f.clone().into_inner();
-                                let f_name = f_inner.next().ok_or_else(|| RiddleError::Parse("Field missing name".to_string(), Some(get_span(&f))))?.as_str().to_string();
-                                let f_expr = parse_pair(f_inner.next().ok_or_else(|| RiddleError::Parse("Field missing value".to_string(), Some(get_span(&f))))?)?;
-                                fields.push((f_name, f_expr));
-                            }
-                        }
-                        let name = match &expr.kind {
-                            AstNodeKind::Identifier(n) => n.clone(),
-                            AstNodeKind::Path(parts) => parts.join("::"),
-                            _ => return Err(RiddleError::Parse("Struct instantiation must follow an identifier or path".to_string(), Some(expr.span))),
-                        };
-                        let new_span = Span {
-                            start: expr.span.start,
-                            end: p_span.end,
-                        };
-                        expr = AstNode {
-                            kind: AstNodeKind::StructInst { name, fields },
-                            span: new_span,
-                        };
-                    }
                     Rule::member_access => {
-                        let member = p.into_inner().next().ok_or_else(|| RiddleError::Parse("Member access missing member name".to_string(), Some(p_span)))?.as_str().to_string();
+                        let member = p
+                            .into_inner()
+                            .next()
+                            .ok_or_else(|| {
+                                RiddleError::Parse(
+                                    "Member access missing member name".to_string(),
+                                    Some(p_span),
+                                )
+                            })?
+                            .as_str()
+                            .to_string();
                         let new_span = Span {
                             start: expr.span.start,
                             end: p_span.end,
@@ -433,12 +594,91 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                             span: new_span,
                         };
                     }
+                    Rule::index_access => {
+                        let index = parse_pair(p.into_inner().next().ok_or_else(|| {
+                            RiddleError::Parse("Index access missing index".to_string(), Some(p_span))
+                        })?)?;
+                        let new_span = Span {
+                            start: expr.span.start,
+                            end: p_span.end,
+                        };
+                        expr = AstNode {
+                            kind: AstNodeKind::IndexAccess {
+                                object: Box::new(expr),
+                                index: Box::new(index),
+                            },
+                            span: new_span,
+                        };
+                    }
+                    Rule::struct_inst_suffix => {
+                        let mut fields = Vec::new();
+                        for f in p.into_inner() {
+                            if f.as_rule() == Rule::struct_inst_field {
+                                let mut f_inner = f.clone().into_inner();
+                                let f_name = f_inner
+                                    .next()
+                                    .ok_or_else(|| {
+                                        RiddleError::Parse(
+                                            "Field missing name".to_string(),
+                                            Some(get_span(&f)),
+                                        )
+                                    })?
+                                    .as_str()
+                                    .to_string();
+                                let f_expr = parse_pair(f_inner.next().ok_or_else(|| {
+                                    RiddleError::Parse(
+                                        "Field missing value".to_string(),
+                                        Some(get_span(&f)),
+                                    )
+                                })?)?;
+                                fields.push((f_name, f_expr));
+                            }
+                        }
+                        let name = match &expr.kind {
+                            AstNodeKind::Identifier(n) => n.clone(),
+                            AstNodeKind::Path(parts) => parts.join("::"),
+                            _ => {
+                                return Err(RiddleError::Parse(
+                                    "Struct instantiation must follow an identifier or path"
+                                        .to_string(),
+                                    Some(expr.span),
+                                ));
+                            }
+                        };
+                        let new_span = Span {
+                            start: expr.span.start,
+                            end: p_span.end,
+                        };
+                        expr = AstNode {
+                            kind: AstNodeKind::StructInst { name, fields },
+                            span: new_span,
+                        };
+                    }
                     _ => unreachable!(),
                 }
             }
             return Ok(expr);
         }
         Rule::identifier => AstNodeKind::Identifier(pair.as_str().to_string()),
+        Rule::if_stmt => {
+            let mut inner = pair.into_inner();
+            let cond = Box::new(parse_pair(inner.next().ok_or_else(|| {
+                RiddleError::Parse("If statement missing condition".to_string(), Some(span))
+            })?)?);
+            let then_block = Box::new(parse_pair(inner.next().ok_or_else(|| {
+                RiddleError::Parse("If statement missing then block".to_string(), Some(span))
+            })?)?);
+            let else_block = if let Some(else_pair) = inner.next() {
+                Some(Box::new(parse_pair(else_pair)?))
+            } else {
+                None
+            };
+            AstNodeKind::If {
+                cond,
+                then_block,
+                else_block,
+            }
+        }
         Rule::path => {
             let parts: Vec<String> = pair
                 .into_inner()
@@ -450,14 +690,16 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
                 AstNodeKind::Path(parts)
             }
         }
-        Rule::type_expr => return parse_pair(pair.into_inner().next().ok_or_else(|| RiddleError::Parse("Empty type expression".to_string(), Some(span)))?),
-        Rule::reference_type => {
-            let inner = pair.into_inner().next().ok_or_else(|| RiddleError::Parse("Reference type missing inner type".to_string(), Some(span)))?;
-            AstNodeKind::RefType(Box::new(parse_pair(inner)?))
+        Rule::type_expr => {
+            return parse_pair(pair.into_inner().next().ok_or_else(|| {
+                RiddleError::Parse("Empty type expression".to_string(), Some(span))
+            })?);
         }
         Rule::path_type => {
             let mut inner = pair.into_inner();
-            let path_pair = inner.next().ok_or_else(|| RiddleError::Parse("Path type missing path".to_string(), Some(span)))?;
+            let path_pair = inner.next().ok_or_else(|| {
+                RiddleError::Parse("Path type missing path".to_string(), Some(span))
+            })?;
             let parts: Vec<String> = path_pair
                 .into_inner()
                 .map(|p| p.as_str().trim().to_string())
@@ -469,15 +711,77 @@ fn parse_pair(pair: Pair<Rule>) -> Result<AstNode> {
             };
             AstNodeKind::TypeExpr { path: parts, args }
         }
-        Rule::value_expr => return parse_pair(pair.into_inner().next().ok_or_else(|| RiddleError::Parse("Empty value expression".to_string(), Some(span)))?),
-        Rule::bool => AstNodeKind::Literal(Literal::Bool(pair.as_str().parse().map_err(|e| RiddleError::Parse(format!("{}", e), Some(span)))?)),
-        Rule::number => AstNodeKind::Literal(Literal::Int(pair.as_str().parse().map_err(|e| RiddleError::Parse(format!("{}", e), Some(span)))?)),
-        Rule::float => AstNodeKind::Literal(Literal::Float(pair.as_str().parse().map_err(|e| RiddleError::Parse(format!("{}", e), Some(span)))?)),
+        Rule::array_type => {
+            let mut inner = pair.into_inner();
+            let elem_type = Box::new(parse_pair(inner.next().ok_or_else(|| {
+                RiddleError::Parse("Array type missing element type".to_string(), Some(span))
+            })?)?);
+            let size = inner
+                .next()
+                .ok_or_else(|| {
+                    RiddleError::Parse("Array type missing size".to_string(), Some(span))
+                })?
+                .as_str()
+                .parse()
+                .map_err(|e| {
+                    RiddleError::Parse(format!("Invalid array size: {}", e), Some(span))
+                })?;
+            AstNodeKind::ArrayType(elem_type, size)
+        }
+        Rule::pointer_type => {
+            let inner = pair.into_inner().next().ok_or_else(|| {
+                RiddleError::Parse("Pointer type missing inner type".to_string(), Some(span))
+            })?;
+            AstNodeKind::PointerType(Box::new(parse_pair(inner)?))
+        }
+        Rule::value_expr => {
+            return parse_pair(pair.into_inner().next().ok_or_else(|| {
+                RiddleError::Parse("Empty value expression".to_string(), Some(span))
+            })?);
+        }
+        Rule::bool => AstNodeKind::Literal(Literal::Bool(
+            pair.as_str()
+                .parse()
+                .map_err(|e| RiddleError::Parse(format!("{}", e), Some(span)))?,
+        )),
+        Rule::list_literal => {
+            let elements = pair
+                .into_inner()
+                .map(parse_pair)
+                .collect::<Result<Vec<_>>>()?;
+            AstNodeKind::ListLiteral(elements)
+        }
+        Rule::number => AstNodeKind::Literal(Literal::Int(
+            pair.as_str()
+                .parse()
+                .map_err(|e| RiddleError::Parse(format!("{}", e), Some(span)))?,
+        )),
+        Rule::float => AstNodeKind::Literal(Literal::Float(
+            pair.as_str()
+                .parse()
+                .map_err(|e| RiddleError::Parse(format!("{}", e), Some(span)))?,
+        )),
         Rule::string => {
             let s = pair.as_str();
             AstNodeKind::Literal(Literal::Str(s[1..s.len() - 1].to_string()))
         }
-        _ => return Err(RiddleError::Parse(format!("Rule {:?} not implemented", pair.as_rule()), Some(span))),
+        Rule::cstr => {
+            let s = pair.into_inner().next().unwrap().as_str();
+            AstNodeKind::Literal(Literal::CStr(s[1..s.len() - 1].to_string()))
+        }
+        Rule::cint => {
+            let n = pair.into_inner().next().unwrap().as_str();
+            AstNodeKind::Literal(Literal::CInt(
+                n.parse()
+                    .map_err(|e| RiddleError::Parse(format!("{}", e), Some(span)))?,
+            ))
+        }
+        _ => {
+            return Err(RiddleError::Parse(
+                format!("Rule {:?} not implemented", pair.as_rule()),
+                Some(span),
+            ));
+        }
     };
     Ok(AstNode { kind, span })
 }

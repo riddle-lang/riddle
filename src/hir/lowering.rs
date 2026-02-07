@@ -1,11 +1,12 @@
+use crate::error::{Result, RiddleError, Span};
 use crate::frontend::ast::{AstNode, AstNodeKind, EnumVariant, Literal};
 use crate::hir::builder::HirBuilder;
 use crate::hir::expr::{HirExpr, HirExprKind, HirLiteral};
-use crate::hir::id::TyExprId;
-use crate::hir::items::{HirEnumVariant, HirFuncParam, HirStructField, HirTraitItem};
+use crate::hir::id::{StmtId, TyExprId};
+use crate::hir::items::{HirEnumVariant, HirFuncParam, HirItem, HirStructField, HirTraitItem};
+use crate::hir::stmt::{HirStmt, HirStmtKind};
 use crate::hir::module::HirModule;
 use crate::hir::type_expr::{HirTypeExpr, HirTypeExprKind};
-use crate::error::{RiddleError, Result, Span};
 
 pub struct AstLower<'a> {
     builder: HirBuilder<'a>,
@@ -34,14 +35,22 @@ impl<'a> AstLower<'a> {
                     if self.deep == 0 {
                         // global variable
                         let ty = self.lower_optional_type_expr(type_expr)?;
-                        let value_node = value
-                            .as_deref()
-                            .ok_or_else(|| RiddleError::Lowering("Global variable initializer required".to_string(), Some(span)))?;
+                        let value_node = value.as_deref().ok_or_else(|| {
+                            RiddleError::Lowering(
+                                "Global variable initializer required".to_string(),
+                                Some(span),
+                            )
+                        })?;
                         let value = self.lower_expr(value_node)?;
                         let value = self.builder.create_expr(value);
                         self.builder
                             .create_global_var(name, ty, value, span)
-                            .map_err(|_| RiddleError::Lowering("Failed to create global variable".to_string(), Some(span)))?;
+                            .map_err(|_| {
+                                RiddleError::Lowering(
+                                    "Failed to create global variable".to_string(),
+                                    Some(span),
+                                )
+                            })?;
                     } else {
                         // local variable
                         let ty = self.lower_optional_type_expr(type_expr)?;
@@ -52,9 +61,12 @@ impl<'a> AstLower<'a> {
                             }
                             None => None,
                         };
-                        self.builder
-                            .local(name, ty, value, span)
-                            .map_err(|_| RiddleError::Lowering("Failed to create local variable".to_string(), Some(span)))?;
+                        self.builder.local(name, ty, value, span).map_err(|_| {
+                            RiddleError::Lowering(
+                                "Failed to create local variable".to_string(),
+                                Some(span),
+                            )
+                        })?;
                     }
                 }
                 AstNodeKind::FuncDecl {
@@ -84,7 +96,12 @@ impl<'a> AstLower<'a> {
                     let func_id = self
                         .builder
                         .create_func(name, generic_params.clone(), ret, p, span)
-                        .map_err(|_| RiddleError::Lowering("Failed to create function".to_string(), Some(span)))?;
+                        .map_err(|_| {
+                            RiddleError::Lowering(
+                                "Failed to create function".to_string(),
+                                Some(span),
+                            )
+                        })?;
 
                     self.builder.set_func(func_id);
                     self.deep += 1;
@@ -109,7 +126,9 @@ impl<'a> AstLower<'a> {
                     }
                     self.builder
                         .create_struct(name, generic_params.clone(), hir_fields, span)
-                        .map_err(|_| RiddleError::Lowering("Failed to create struct".to_string(), Some(span)))?;
+                        .map_err(|_| {
+                            RiddleError::Lowering("Failed to create struct".to_string(), Some(span))
+                        })?;
                 }
                 AstNodeKind::EnumDecl {
                     name,
@@ -143,14 +162,15 @@ impl<'a> AstLower<'a> {
                                         span: span_f,
                                     });
                                 }
-                                hir_variants
-                                    .push(HirEnumVariant::Struct(name.clone(), hir_fields));
+                                hir_variants.push(HirEnumVariant::Struct(name.clone(), hir_fields));
                             }
                         }
                     }
                     self.builder
                         .create_enum(name, generic_params.clone(), hir_variants, span)
-                        .map_err(|_| RiddleError::Lowering("Failed to create enum".to_string(), Some(span)))?;
+                        .map_err(|_| {
+                            RiddleError::Lowering("Failed to create enum".to_string(), Some(span))
+                        })?;
                 }
                 AstNodeKind::TraitDecl {
                     name,
@@ -188,7 +208,9 @@ impl<'a> AstLower<'a> {
                     }
                     self.builder
                         .create_trait(name, generic_params.clone(), hir_items, span)
-                        .map_err(|_| RiddleError::Lowering("Failed to create trait".to_string(), Some(span)))?;
+                        .map_err(|_| {
+                            RiddleError::Lowering("Failed to create trait".to_string(), Some(span))
+                        })?;
                 }
                 AstNodeKind::ImplDecl {
                     generic_params,
@@ -233,12 +255,31 @@ impl<'a> AstLower<'a> {
                             };
                             let ret = self.builder.create_type_expr(ret);
 
-                            // TODO: mangled name for generic target type
-                            let mangled_name = format!("impl::{}", name);
+                            let mut combined_generic_params = generic_params.clone();
+                            combined_generic_params.extend(method_generic_params.clone());
+
+                            // Mangled name for method
+                            let target_name = match &self.builder.module.type_exprs[target_te.0].kind {
+                                HirTypeExprKind::Path(n) => n.clone(),
+                                HirTypeExprKind::Generic(n, _) => n.clone(),
+                                _ => "unknown".to_string(),
+                            };
+                            let mangled_name = format!("impl::{}::{}", target_name, name);
                             let func_id = self
                                 .builder
-                                .create_func(&mangled_name, method_generic_params.clone(), ret, p, i_span)
-                                .map_err(|_| RiddleError::Lowering("Failed to create function".to_string(), Some(i_span)))?;
+                                .create_func(
+                                    &mangled_name,
+                                    combined_generic_params,
+                                    ret,
+                                    p,
+                                    i_span,
+                                )
+                                .map_err(|_| {
+                                    RiddleError::Lowering(
+                                        "Failed to create function".to_string(),
+                                        Some(i_span),
+                                    )
+                                })?;
 
                             self.builder.set_func(func_id);
                             self.deep += 1;
@@ -250,7 +291,9 @@ impl<'a> AstLower<'a> {
                     }
                     self.builder
                         .create_impl(generic_params.clone(), trait_te, target_te, methods, span)
-                        .map_err(|_| RiddleError::Lowering("Failed to create impl".to_string(), Some(span)))?;
+                        .map_err(|_| {
+                            RiddleError::Lowering("Failed to create impl".to_string(), Some(span))
+                        })?;
                 }
                 AstNodeKind::ExternBlock { abi, functions } => {
                     for func in functions {
@@ -261,7 +304,10 @@ impl<'a> AstLower<'a> {
                     self.lower_extern_func(abi.clone(), function, span)?;
                 }
                 _ => {
-                    return Err(RiddleError::Lowering("Expected statement".to_string(), Some(span)));
+                    return Err(RiddleError::Lowering(
+                        "Expected statement".to_string(),
+                        Some(span),
+                    ));
                 }
             }
         }
@@ -293,15 +339,22 @@ impl<'a> AstLower<'a> {
 
         self.builder
             .create_extern_func(abi, &func.name, ret, p, func.is_variadic, span)
-            .map_err(|_| RiddleError::Lowering("Failed to create extern function".to_string(), Some(span)))?;
+            .map_err(|_| {
+                RiddleError::Lowering("Failed to create extern function".to_string(), Some(span))
+            })?;
         Ok(())
     }
 
     fn lower_type_expr(&mut self, node: &Box<AstNode>) -> Result<HirTypeExpr> {
         let span = node.span;
         match &node.kind {
-            AstNodeKind::Identifier(name) => Ok(HirTypeExpr::new(HirTypeExprKind::Path(name.clone()), span)),
-            AstNodeKind::Path(parts) => Ok(HirTypeExpr::new(HirTypeExprKind::Path(parts.join("::")), span)),
+            AstNodeKind::Identifier(name) => {
+                Ok(HirTypeExpr::new(HirTypeExprKind::Path(name.clone()), span))
+            }
+            AstNodeKind::Path(parts) => Ok(HirTypeExpr::new(
+                HirTypeExprKind::Path(parts.join("::")),
+                span,
+            )),
             AstNodeKind::TypeExpr { path, args } => {
                 let name = path.join("::");
                 if args.is_empty() {
@@ -312,15 +365,26 @@ impl<'a> AstLower<'a> {
                         let arg_te = self.lower_type_expr(&Box::new(arg.clone()))?;
                         hir_args.push(self.builder.create_type_expr(arg_te));
                     }
-                    Ok(HirTypeExpr::new(HirTypeExprKind::Generic(name, hir_args), span))
+                    Ok(HirTypeExpr::new(
+                        HirTypeExprKind::Generic(name, hir_args),
+                        span,
+                    ))
                 }
             }
-            AstNodeKind::RefType(inner) => {
+            AstNodeKind::PointerType(inner) => {
                 let inner_te = self.lower_type_expr(inner)?;
-                let inner_te_id = self.builder.create_type_expr(inner_te);
-                Ok(HirTypeExpr::new(HirTypeExprKind::Ref(inner_te_id), span))
+                let inner_id = self.builder.create_type_expr(inner_te);
+                Ok(HirTypeExpr::new(HirTypeExprKind::Pointer(inner_id), span))
             }
-            _ => Err(RiddleError::Lowering(format!("Unexpected node in type expr: {:?}", node), Some(span))),
+            AstNodeKind::ArrayType(inner, size) => {
+                let inner_te = self.lower_type_expr(inner)?;
+                let inner_id = self.builder.create_type_expr(inner_te);
+                Ok(HirTypeExpr::new(HirTypeExprKind::Array(inner_id, *size), span))
+            }
+            _ => Err(RiddleError::Lowering(
+                format!("Unexpected node in type expr: {:?}", node),
+                Some(span),
+            )),
         }
     }
 
@@ -338,31 +402,40 @@ impl<'a> AstLower<'a> {
         }
     }
 
-    fn lower_block(&mut self, node: &AstNode) -> Result<()> {
+    fn lower_block_to_ids(&mut self, node: &AstNode) -> Result<Vec<StmtId>> {
         let span = node.span;
         match &node.kind {
             AstNodeKind::Block {
                 statements,
                 final_expr,
             } => {
+                let mut ids = Vec::new();
                 for stmt in statements {
-                    self.lower_stmt(stmt)?;
+                    // We need a way to lower a statement without adding it to the function body
+                    // but still adding it to the module.
+                    let id = self.lower_stmt_to_id(stmt)?;
+                    ids.push(id);
                 }
                 if let Some(expr) = final_expr {
                     let expr_span = expr.span;
                     let expr_hir = self.lower_expr(expr)?;
                     let expr_id = self.builder.create_expr(expr_hir);
-                    self.builder
-                        .expr_stmt(expr_id, false, expr_span)
-                        .map_err(|_| RiddleError::Lowering("Failed to create expr stmt".to_string(), Some(expr_span)))?;
+                    let stmt_id = self.builder.create_stmt(HirStmt::new(
+                        HirStmtKind::Expr {
+                            expr: expr_id,
+                            has_semi: false,
+                        },
+                        expr_span,
+                    ));
+                    ids.push(stmt_id);
                 }
-                Ok(())
+                Ok(ids)
             }
             _ => Err(RiddleError::Lowering("Expected block".to_string(), Some(span))),
         }
     }
 
-    fn lower_stmt(&mut self, node: &AstNode) -> Result<()> {
+    fn lower_stmt_to_id(&mut self, node: &AstNode) -> Result<StmtId> {
         let span = node.span;
         match &node.kind {
             AstNodeKind::VarDecl {
@@ -385,27 +458,94 @@ impl<'a> AstLower<'a> {
                     }
                     None => None,
                 };
-                self.builder
-                    .local(name, ty, value, span)
-                    .map_err(|_| RiddleError::Lowering("Failed to create local variable".to_string(), Some(span)))?;
+                let id = self.builder.next_local_id();
+                Ok(self.builder.create_stmt(HirStmt::new(
+                    HirStmtKind::Let {
+                        name: name.into(),
+                        ty_annot: ty,
+                        init: value,
+                        id,
+                    },
+                    span,
+                )))
             }
             AstNodeKind::Return(val) => {
                 let expr = self.lower_expr(val)?;
                 let expr_id = self.builder.create_expr(expr);
-                self.builder
-                    .ret(expr_id, span)
-                    .map_err(|_| RiddleError::Lowering("Failed to create return stmt".to_string(), Some(span)))?;
+                Ok(self.builder.create_stmt(HirStmt::new(
+                    HirStmtKind::Return { value: Some(expr_id) },
+                    span,
+                )))
             }
             AstNodeKind::Block { .. } => {
-                self.lower_block(node)?;
+                let stmts = self.lower_block_to_ids(node)?;
+                let block_expr = self.builder.create_expr(HirExpr::new(
+                    HirExprKind::Block { stmts },
+                    node.span,
+                ));
+                Ok(self.builder.create_stmt(HirStmt::new(
+                    HirStmtKind::Expr { expr: block_expr, has_semi: false },
+                    node.span,
+                )))
+            }
+            AstNodeKind::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                let cond_hir = self.lower_expr(cond)?;
+                let cond_id = self.builder.create_expr(cond_hir);
+
+                let then_id = self.lower_stmt_to_id(then_block)?;
+                let else_id = if let Some(eb) = else_block {
+                    Some(self.lower_stmt_to_id(eb)?)
+                } else {
+                    None
+                };
+
+                let if_kind = HirStmtKind::If {
+                    cond: cond_id,
+                    then_block: then_id,
+                    else_block: else_id,
+                };
+                Ok(self.builder.create_stmt(HirStmt::new(if_kind, span)))
             }
             _ => {
                 let expr = self.lower_expr(node)?;
                 let expr_id = self.builder.create_expr(expr);
-                self.builder
-                    .expr_stmt(expr_id, true, span)
-                    .map_err(|_| RiddleError::Lowering("Failed to create expr stmt".to_string(), Some(span)))?;
+                Ok(self.builder.create_stmt(HirStmt::new(
+                    HirStmtKind::Expr {
+                        expr: expr_id,
+                        has_semi: true,
+                    },
+                    span,
+                )))
             }
+        }
+    }
+
+    fn lower_block(&mut self, node: &AstNode) -> Result<()> {
+        let ids = self.lower_block_to_ids(node)?;
+        for id in ids {
+            let func_id = self.builder.active_func.ok_or(RiddleError::Lowering(
+                "No active function".to_string(),
+                None,
+            ))?;
+            if let HirItem::Func(f) = &mut self.builder.module.items[func_id.0] {
+                f.body.push(id);
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_stmt(&mut self, node: &AstNode) -> Result<()> {
+        let id = self.lower_stmt_to_id(node)?;
+        let func_id = self.builder.active_func.ok_or(RiddleError::Lowering(
+            "No active function".to_string(),
+            None,
+        ))?;
+        if let HirItem::Func(f) = &mut self.builder.module.items[func_id.0] {
+            f.body.push(id);
         }
         Ok(())
     }
@@ -414,40 +554,74 @@ impl<'a> AstLower<'a> {
         let span = node.span;
         match &node.kind {
             AstNodeKind::Literal(lit) => match lit {
-                Literal::Int(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Int(*val)), span)),
-                Literal::Bool(val) => {
-                    Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Bool(*val)), span))
-                }
-                Literal::Float(val) => {
-                    Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Float(*val)), span))
-                }
-                Literal::Str(val) => Ok(HirExpr::new(HirExprKind::Literal(HirLiteral::Str(
-                    val.clone(),
-                )), span)),
+                Literal::Int(val) => Ok(HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::Int(*val)),
+                    span,
+                )),
+                Literal::Bool(val) => Ok(HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::Bool(*val)),
+                    span,
+                )),
+                Literal::Float(val) => Ok(HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::Float(*val)),
+                    span,
+                )),
+                Literal::Str(val) => Ok(HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::Str(val.clone())),
+                    span,
+                )),
+                Literal::CStr(val) => Ok(HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::CStr(val.clone())),
+                    span,
+                )),
+                Literal::CInt(val) => Ok(HirExpr::new(
+                    HirExprKind::Literal(HirLiteral::CInt(*val)),
+                    span,
+                )),
             },
             AstNodeKind::BinaryExpr { lhs, op, rhs } => {
                 let lhs_hir = self.lower_expr(lhs)?;
                 let lhs_id = self.builder.create_expr(lhs_hir);
                 let rhs_hir = self.lower_expr(rhs)?;
                 let rhs_id = self.builder.create_expr(rhs_hir);
-                Ok(HirExpr::new(HirExprKind::BinaryOp {
-                    lhs: lhs_id,
-                    op: op.clone(),
-                    rhs: rhs_id,
-                }, span))
+                Ok(HirExpr::new(
+                    HirExprKind::BinaryOp {
+                        lhs: lhs_id,
+                        op: op.clone(),
+                        rhs: rhs_id,
+                    },
+                    span,
+                ))
             }
-            AstNodeKind::Identifier(name) => Ok(HirExpr::new(HirExprKind::Symbol {
-                name: name.clone(),
-                id: None,
-                def_id: None,
-            }, span)),
-            AstNodeKind::Path(parts) => {
-                let name = parts.join("::");
-                Ok(HirExpr::new(HirExprKind::Symbol {
-                    name,
+            AstNodeKind::UnaryExpr { op, expr } => {
+                let expr_hir = self.lower_expr(expr)?;
+                let expr_id = self.builder.create_expr(expr_hir);
+                Ok(HirExpr::new(
+                    HirExprKind::UnaryOp {
+                        op: op.clone(),
+                        expr: expr_id,
+                    },
+                    span,
+                ))
+            }
+            AstNodeKind::Identifier(name) => Ok(HirExpr::new(
+                HirExprKind::Symbol {
+                    name: name.clone(),
                     id: None,
                     def_id: None,
-                }, span))
+                },
+                span,
+            )),
+            AstNodeKind::Path(parts) => {
+                let name = parts.join("::");
+                Ok(HirExpr::new(
+                    HirExprKind::Symbol {
+                        name,
+                        id: None,
+                        def_id: None,
+                    },
+                    span,
+                ))
             }
             AstNodeKind::Call { func, args } => {
                 let callee_hir = self.lower_expr(func)?;
@@ -458,10 +632,13 @@ impl<'a> AstLower<'a> {
                     let arg_id = self.builder.create_expr(arg_expr);
                     arg_ids.push(arg_id);
                 }
-                Ok(HirExpr::new(HirExprKind::Call {
-                    callee: callee_id,
-                    args: arg_ids,
-                }, span))
+                Ok(HirExpr::new(
+                    HirExprKind::Call {
+                        callee: callee_id,
+                        args: arg_ids,
+                    },
+                    span,
+                ))
             }
             AstNodeKind::StructInst { name, fields } => {
                 let mut hir_fields = Vec::new();
@@ -470,21 +647,69 @@ impl<'a> AstLower<'a> {
                     let f_expr_id = self.builder.create_expr(f_expr_hir);
                     hir_fields.push((f_name.clone(), f_expr_id));
                 }
-                Ok(HirExpr::new(HirExprKind::StructInst {
-                    struct_name: name.clone(),
-                    fields: hir_fields,
-                }, span))
+                Ok(HirExpr::new(
+                    HirExprKind::StructInst {
+                        struct_name: name.clone(),
+                        fields: hir_fields,
+                    },
+                    span,
+                ))
             }
             AstNodeKind::MemberAccess { object, member } => {
                 let object_hir = self.lower_expr(object)?;
                 let object_id = self.builder.create_expr(object_hir);
-                Ok(HirExpr::new(HirExprKind::MemberAccess {
-                    object: object_id,
-                    member: member.clone(),
-                    id: None,
-                }, span))
+                Ok(HirExpr::new(
+                    HirExprKind::MemberAccess {
+                        object: object_id,
+                        member: member.clone(),
+                        id: None,
+                    },
+                    span,
+                ))
             }
-            _ => Err(RiddleError::Lowering(format!("Unsupported expression: {:?}", node), Some(span))),
+            AstNodeKind::IndexAccess { object, index } => {
+                let object_hir = self.lower_expr(object)?;
+                let object_id = self.builder.create_expr(object_hir);
+                let index_hir = self.lower_expr(index)?;
+                let index_id = self.builder.create_expr(index_hir);
+                Ok(HirExpr::new(
+                    HirExprKind::IndexAccess {
+                        object: object_id,
+                        index: index_id,
+                    },
+                    span,
+                ))
+            }
+            AstNodeKind::ListLiteral(elements) => {
+                let mut expr_ids = Vec::new();
+                for elem in elements {
+                    let elem_hir = self.lower_expr(elem)?;
+                    let elem_id = self.builder.create_expr(elem_hir);
+                    expr_ids.push(elem_id);
+                }
+                Ok(HirExpr::new(HirExprKind::ListLiteral(expr_ids), span))
+            }
+            AstNodeKind::CastExpr { expr, target_type } => {
+                let expr_hir = self.lower_expr(expr)?;
+                let expr_id = self.builder.create_expr(expr_hir);
+                let target_ty_expr = self.lower_type_expr(target_type)?;
+                let target_ty_expr_id = self.builder.create_type_expr(target_ty_expr);
+                Ok(HirExpr::new(
+                    HirExprKind::Cast {
+                        expr: expr_id,
+                        target_ty_expr: target_ty_expr_id,
+                    },
+                    span,
+                ))
+            }
+            AstNodeKind::Block { .. } => {
+                let stmts = self.lower_block_to_ids(node)?;
+                Ok(HirExpr::new(HirExprKind::Block { stmts }, span))
+            }
+            _ => Err(RiddleError::Lowering(
+                format!("Unsupported expression: {:?}", node),
+                Some(span),
+            )),
         }
     }
 }

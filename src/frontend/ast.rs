@@ -64,6 +64,10 @@ pub enum AstNodeKind {
         op: String,
         rhs: Box<AstNode>,
     },
+    UnaryExpr {
+        op: String,
+        expr: Box<AstNode>,
+    },
     Call {
         func: Box<AstNode>,
         args: Vec<AstNode>,
@@ -76,7 +80,21 @@ pub enum AstNodeKind {
         object: Box<AstNode>,
         member: String,
     },
+    IndexAccess {
+        object: Box<AstNode>,
+        index: Box<AstNode>,
+    },
+    CastExpr {
+        expr: Box<AstNode>,
+        target_type: Box<AstNode>,
+    },
+    ListLiteral(Vec<AstNode>),
 
+    If {
+        cond: Box<AstNode>,
+        then_block: Box<AstNode>,
+        else_block: Option<Box<AstNode>>,
+    },
     // Primary Expressions
     Identifier(String),
     Path(Vec<String>),
@@ -84,7 +102,8 @@ pub enum AstNodeKind {
         path: Vec<String>,
         args: Vec<AstNode>,
     },
-    RefType(Box<AstNode>),
+    ArrayType(Box<AstNode>, usize),
+    PointerType(Box<AstNode>),
     Literal(Literal),
 }
 
@@ -129,4 +148,6 @@ pub enum Literal {
     Float(f64),
     Bool(bool),
     Str(String),
+    CStr(String),
+    CInt(i64),
 }

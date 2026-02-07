@@ -1,5 +1,5 @@
-use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyId};
 use crate::error::Span;
+use crate::hir::id::{DefId, ExprId, LocalId, StmtId, TyExprId, TyId};
 
 #[derive(Debug, Clone)]
 pub struct HirExpr {
@@ -10,7 +10,11 @@ pub struct HirExpr {
 
 impl HirExpr {
     pub fn new(kind: HirExprKind, span: Span) -> Self {
-        Self { kind, ty: None, span }
+        Self {
+            kind,
+            ty: None,
+            span,
+        }
     }
 }
 
@@ -21,6 +25,10 @@ pub enum HirExprKind {
         lhs: ExprId,
         op: String,
         rhs: ExprId,
+    },
+    UnaryOp {
+        op: String,
+        expr: ExprId,
     },
     Symbol {
         name: String,
@@ -43,6 +51,15 @@ pub enum HirExprKind {
         member: String,
         id: Option<DefId>,
     },
+    IndexAccess {
+        object: ExprId,
+        index: ExprId,
+    },
+    ListLiteral(Vec<ExprId>),
+    Cast {
+        expr: ExprId,
+        target_ty_expr: TyExprId,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -51,4 +68,6 @@ pub enum HirLiteral {
     Float(f64),
     Bool(bool),
     Str(String),
+    CStr(String),
+    CInt(i64),
 }

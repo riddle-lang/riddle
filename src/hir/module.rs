@@ -4,9 +4,9 @@ use crate::hir::stmt::HirStmt;
 use crate::hir::type_expr::HirTypeExpr;
 use crate::hir::types::HirType;
 
-use std::collections::HashMap;
 use crate::hir::id::DefId;
 use crate::hir::id::TyId;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct HirModule {

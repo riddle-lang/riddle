@@ -6,7 +6,8 @@ BLOCK_COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 program   = { SOI ~ statement* ~ EOI }
 
 statement = _{
-      block
+      if_stmt
+    | block
     | var_decl
     | func_decl
     | extern_block
@@ -25,8 +26,9 @@ extern_item  = { "fun" ~ identifier ~ "(" ~ (func_param ~ ("," ~ func_param)*)? 
 variadic_marker = { "..." }
 
 var_decl  = { ("var" | "let") ~ identifier ~ (":" ~ type_expr)? ~ ("=" ~ value_expr)? ~ ";" }
-type_expr = { reference_type | path_type }
-reference_type = { "&" ~ type_expr }
+type_expr = { array_type | pointer_type | path_type }
+array_type = { "[" ~ type_expr ~ ";" ~ number ~ "]" }
+pointer_type = { "*" ~ type_expr }
 path_type = { path ~ generic_args? }
 generic_args = { "<" ~ type_expr ~ ("," ~ type_expr)* ~ ">" }
 generic_params = { "<" ~ identifier ~ ("," ~ identifier)* ~ ">" }
@@ -47,6 +49,7 @@ enum_struct   = { "{" ~ (struct_field ~ ("," ~ struct_field)*)? ~ ","? ~ "}" }
 trait_decl = { "trait" ~ identifier ~ generic_params? ~ "{" ~ trait_item* ~ "}" }
 trait_item = { "fun" ~ identifier ~ generic_params? ~ "(" ~ (func_param ~ ("," ~ func_param)*)? ~ ")" ~ ("->" ~ type_expr)? ~ ";" }
 
+if_stmt = { "if" ~ "(" ~ expr ~ ")" ~ block ~ ("else" ~ (if_stmt | block))? }
 impl_decl = { "impl" ~ generic_params? ~ type_expr ~ ("for" ~ type_expr)? ~ "{" ~ func_decl* ~ "}" }
 
 return_stmt = {"return" ~ expr ~ ";"}
@@ -57,23 +60,42 @@ expr_stmt = { expr ~ ";" }
 
 expr = _{ binary_expr }
 
-binary_expr  = { postfix_expr ~ (op ~ postfix_expr)* }
+binary_expr  = _{ assign_expr }
+assign_expr  = { compare_expr ~ (assign_op ~ assign_expr)? }
+assign_op    = { "=" }
+compare_expr = { add_expr ~ (compare_op ~ add_expr)* }
+compare_op   = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+add_expr     = { mul_expr ~ (add_op ~ mul_expr)* }
+add_op       = { "+" | "-" }
+mul_expr     = { unary_expr ~ (mul_op ~ unary_expr)* }
+mul_op       = { "*" | "/" }
 
-postfix_expr = { primary_expr ~ (call_suffix | struct_inst | member_access)* }
+unary_expr   = { (unary_op)* ~ cast_expr }
+unary_op     = { "*" | "&" | "-" | "!" }
+
+cast_expr = { postfix_expr ~ ("as" ~ type_expr)* }
+
+postfix_expr = { primary_expr ~ (call_suffix | member_access | index_access | struct_inst_suffix)* }
 member_access = { "." ~ identifier }
-struct_inst = { "{" ~ (struct_inst_field ~ ("," ~ struct_inst_field)*)? ~ ","? ~ "}" }
+index_access = { "[" ~ expr ~ "]" }
+struct_inst_suffix = { "{" ~ (struct_inst_field ~ ("," ~ struct_inst_field)*)? ~ ","? ~ "}" }
 struct_inst_field = { identifier ~ ":" ~ expr }
 
 call_suffix = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 
 primary_expr = _{
       block
+    | list_literal
     | literal
     | path
     | "(" ~ expr ~ ")"
 }
+list_literal = { "[" ~ (expr ~ ("," ~ expr)*)? ~ ","? ~ "]" }
 
-literal = _{ float | number | string | bool }
+literal = _{ cstr | cint | float | number | string | bool }
+
+cstr = { "cstr" ~ string }
+cint = { "cint" ~ number }
 
 bool   = { "true" | "false" }
 
@@ -88,5 +110,4 @@ identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 path = { identifier ~ ("::" ~ identifier)* }
 
-op = @{ op_char+ }
-op_char = { "+" | "-" | "*" | "/" | "!" | "@" | "%" | "^" | "&" | "=" | "~" | "<" | ">" }
+op = @{ "+" | "-" | "*" | "/" | "==" | "!=" | "<=" | ">=" | "<" | ">" | "=" }
