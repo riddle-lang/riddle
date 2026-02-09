@@ -130,6 +130,7 @@ impl Codegen {
         fn_id
     }
 
+    #[warn(dead_code)]
     fn print_extern_decl(&self, func: &HirExternFunc, sig: &Signature) {
         let mut params = sig
             .params

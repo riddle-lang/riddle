@@ -133,27 +133,3 @@ struct RiddleVec {
     int64_t cap;
     int64_t elem_size;
 };
-
-struct RiddleVec* riddle_vec_reserve(void* data, int64_t len, int64_t cap, int64_t elem_size) {
-    // printf("DEBUG: reserve called, data=%p, len=%lld, cap=%lld, size=%lld\n", data, (long long)len, (long long)cap, (long long)elem_size);
-    if (len < cap) {
-        struct RiddleVec* out = riddle_gc_alloc(sizeof(struct RiddleVec));
-        out->data = data;
-        out->len = len;
-        out->cap = cap;
-        out->elem_size = elem_size;
-        return out;
-    }
-    int64_t new_cap = cap == 0 ? 4 : cap * 2;
-    // printf("DEBUG: expanding to %lld\n", (long long)new_cap);
-    void* new_data = riddle_gc_alloc(new_cap * elem_size);
-    if (cap > 0) {
-        memcpy(new_data, data, len * elem_size);
-    }
-    struct RiddleVec* out = riddle_gc_alloc(sizeof(struct RiddleVec));
-    out->data = new_data;
-    out->len = len;
-    out->cap = new_cap;
-    out->elem_size = elem_size;
-    return out;
-}

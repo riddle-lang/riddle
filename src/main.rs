@@ -1,4 +1,3 @@
-use std::os::raw::c_int;
 use crate::frontend::ast::AstNodeKind::Program;
 use codegen::Codegen;
 use hir::lowering::AstLower;
@@ -17,14 +16,39 @@ fn main() {
         extern "C" {
             fun printf(fmt: cstr, ...);
             fun riddle_gc_alloc(size: int) -> *int;
+            fun memcpy(dst: *int, src: *int, size: int) -> *int;
         }
-        extern "C" fun riddle_vec_reserve(data: *int, len: int, cap: int, elem_size: int) -> *int;
 
         struct Vec<T> {
             data: *T,
             len: int,
             cap: int,
             elem_size: int
+        }
+
+        fun vec_reserve<T>(v: Vec<T>) -> Vec<T> {
+            if (v.len < v.cap) {
+                return v;
+            }
+
+            var new_cap: int = 0;
+            if (v.cap == 0) {
+                new_cap = 4;
+            } else {
+                new_cap = v.cap * 2;
+            }
+
+            let new_data = riddle_gc_alloc(new_cap * v.elem_size);
+            if (v.cap > 0) {
+                memcpy(new_data, v.data as *int, v.len * v.elem_size);
+            }
+
+            return Vec {
+                data: new_data as *T,
+                len: v.len,
+                cap: new_cap,
+                elem_size: v.elem_size
+            };
         }
 
         trait VecTrait<T> {
@@ -34,8 +58,7 @@ fn main() {
 
         impl<T> VecTrait<T> for Vec<T> {
             fun push(self: Vec<T>, value: T) -> Vec<T> {
-                let p_raw = riddle_vec_reserve(self.data as *int, self.len, self.cap, self.elem_size);
-                let out = p_raw as Vec<T>;
+                let out = vec_reserve(self);
                 out.data[out.len] = value;
                 out.len = out.len + 1;
                 return out;
@@ -57,7 +80,7 @@ fn main() {
         }
 
         fun main() -> int {
-            var v: Vec<int> = vec_new(2, 8);
+            var v: Vec<int> = vec_new(0, 8);
             v = v.push(100);
             v = v.push(200);
             v = v.push(300);

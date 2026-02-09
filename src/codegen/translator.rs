@@ -6,7 +6,6 @@ use crate::hir::module::HirModule;
 use crate::hir::stmt::HirStmtKind;
 use crate::hir::types::HirType;
 use cranelift::prelude::*;
-use cranelift::prelude::codegen::ir::Opcode;
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use cranelift_object::ObjectModule;
 use std::collections::HashMap;
@@ -42,7 +41,7 @@ impl<'a> FunctionTranslator<'a> {
                 else_block,
             } => {
                 let cond_val = self.translate_expr(*cond);
-                // Ensure condition is b1 for branching
+                // Ensure the condition is b1 for branching
                 let zero = self.builder.ins().iconst(types::I64, 0);
                 let cond_b1 = self.builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
 
@@ -129,9 +128,7 @@ impl<'a> FunctionTranslator<'a> {
                     self.builder.ins().symbol_value(types::I64, data_ref)
                 }
                 HirLiteral::CInt(i) => self.builder.ins().iconst(types::I64, *i),
-                HirLiteral::Float(f) => {
-                    self.builder.ins().f64const(*f)
-                }
+                HirLiteral::Float(f) => self.builder.ins().f64const(*f),
             },
             HirExprKind::BinaryOp { lhs, op, rhs } => {
                 let r = self.translate_expr(*rhs);
@@ -157,7 +154,12 @@ impl<'a> FunctionTranslator<'a> {
                             let ty = &self.hir.types[ty_id.0];
                             if let HirType::Struct(struct_did, _) = ty {
                                 let offset = self.get_field_offset(*struct_did, member);
-                                self.builder.ins().store(MemFlags::new(), r, obj_ptr, offset as i32);
+                                self.builder.ins().store(
+                                    MemFlags::new(),
+                                    r,
+                                    obj_ptr,
+                                    offset as i32,
+                                );
                             }
                         }
                         HirExprKind::IndexAccess { object, index } => {
@@ -236,20 +238,25 @@ impl<'a> FunctionTranslator<'a> {
                             HirExprKind::Symbol { id, .. } => {
                                 if let Some(local_id) = id {
                                     let var = self.variables[local_id];
-                                    // This is tricky in Cranelift as it doesn't normally allow taking address of a Variable
-                                    // But since our variables are mostly in memory or on stack, 
+                                    // This is tricky in Cranelift as it doesn't normally allow taking the address of a Variable
+                                    // But since our variables are mostly in memory or on stack,
                                     // we might need them to be stack slots.
                                     // However, Riddle seems to treat variables as I64.
-                                    // For simplicity, let's assume we can't take address of local yet or it's a stack slot.
-                                    unimplemented!("Taking address of local variable not supported yet")
+                                    // For simplicity, let's assume we can't take the address of local yet, or it's a stack slot.
+                                    unimplemented!(
+                                        "Taking address of local variable not supported yet"
+                                    )
                                 } else {
-                                    unimplemented!("Taking address of non-local symbol not supported yet")
+                                    unimplemented!(
+                                        "Taking address of non-local symbol not supported yet"
+                                    )
                                 }
                             }
                             HirExprKind::MemberAccess { object, member, .. } => {
                                 let obj_ptr = self.translate_expr(*object);
                                 let obj_expr = &self.hir.exprs[object.0];
-                                let ty_id = obj_expr.ty.expect("Member access object must have a type");
+                                let ty_id =
+                                    obj_expr.ty.expect("Member access object must have a type");
                                 let ty = &self.hir.types[ty_id.0];
                                 if let HirType::Struct(struct_did, _) = ty {
                                     let offset = self.get_field_offset(*struct_did, member);
@@ -261,12 +268,8 @@ impl<'a> FunctionTranslator<'a> {
                             _ => unimplemented!("Taking address of this expression not supported"),
                         }
                     }
-                    "*" => {
-                        self.builder.ins().load(types::I64, MemFlags::new(), e, 0)
-                    }
-                    "-" => {
-                        self.builder.ins().ineg(e)
-                    }
+                    "*" => self.builder.ins().load(types::I64, MemFlags::new(), e, 0),
+                    "-" => self.builder.ins().ineg(e),
                     "!" => {
                         // Invert boolean (assuming 0 or 1)
                         let zero = self.builder.ins().iconst(types::I64, 0);
@@ -291,7 +294,7 @@ impl<'a> FunctionTranslator<'a> {
             HirExprKind::Call { callee, args } => {
                 let callee_expr = &self.hir.exprs[callee.0];
                 let mut arg_vals = Vec::new();
-                
+
                 let mut self_val = None;
                 if let HirExprKind::MemberAccess { object, .. } = &callee_expr.kind {
                     self_val = Some(self.translate_expr(*object));
@@ -355,14 +358,18 @@ impl<'a> FunctionTranslator<'a> {
                         if s.name == "Vec" {
                             let offset_data = self.get_field_offset(*did, "data");
                             let offset_size = self.get_field_offset(*did, "elem_size");
-                            let data_ptr =
-                                self.builder
-                                    .ins()
-                                    .load(types::I64, MemFlags::new(), obj_ptr, offset_data as i32);
-                            scale =
-                                self.builder
-                                    .ins()
-                                    .load(types::I64, MemFlags::new(), obj_ptr, offset_size as i32);
+                            let data_ptr = self.builder.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                obj_ptr,
+                                offset_data as i32,
+                            );
+                            scale = self.builder.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                obj_ptr,
+                                offset_size as i32,
+                            );
                             obj_ptr = data_ptr;
                         }
                     }
@@ -370,9 +377,14 @@ impl<'a> FunctionTranslator<'a> {
 
                 let offset = self.builder.ins().imul(index_val, scale);
                 let addr = self.builder.ins().iadd(obj_ptr, offset);
-                self.builder.ins().load(types::I64, MemFlags::new(), addr, 0)
+                self.builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), addr, 0)
             }
-            HirExprKind::Cast { expr, target_ty_expr } => {
+            HirExprKind::Cast {
+                expr,
+                target_ty_expr,
+            } => {
                 let val = self.translate_expr(*expr);
                 let target_ty_id = self.hir.type_exprs[target_ty_expr.0]
                     .curr_ty
@@ -380,7 +392,7 @@ impl<'a> FunctionTranslator<'a> {
                 let target_ty = &self.hir.types[target_ty_id.0];
                 match target_ty {
                     HirType::CInt => {
-                        // For now we use I64 for everything
+                        // For now, we use I64 for everything
                         val
                     }
                     HirType::CStr => val,
@@ -513,7 +525,7 @@ impl<'a> FunctionTranslator<'a> {
             let mut sig = self.module.make_signature();
             let ty_id = self.hir.item_types[&def_id];
             let param_count = match &self.hir.types[ty_id.0] {
-                crate::hir::types::HirType::Func(sig_types, _) => sig_types.len() - 1,
+                HirType::Func(sig_types, _) => sig_types.len() - 1,
                 _ => 0,
             };
 
@@ -543,8 +555,8 @@ impl<'a> FunctionTranslator<'a> {
     fn extract_generic_args(&self, def_id: DefId, instantiated_ty: TyId) -> Vec<TyId> {
         let ty = &self.hir.types[instantiated_ty.0];
         match ty {
-            crate::hir::types::HirType::Struct(_, args) => return args.clone(),
-            crate::hir::types::HirType::Enum(_, args) => return args.clone(),
+            HirType::Struct(_, args) => return args.clone(),
+            HirType::Enum(_, args) => return args.clone(),
             _ => {}
         }
 
@@ -565,14 +577,14 @@ impl<'a> FunctionTranslator<'a> {
         }
 
         if let (
-            crate::hir::types::HirType::Func(orig_sig, _),
-            crate::hir::types::HirType::Func(inst_sig, _),
+            HirType::Func(orig_sig, _),
+            HirType::Func(inst_sig, _),
         ) = (&self.hir.types[orig_ty_id.0], ty)
         {
             for gp_name in generic_params {
                 let mut found = false;
                 for (i, &orig_p_id) in orig_sig.iter().enumerate() {
-                    if let crate::hir::types::HirType::GenericParam(name) =
+                    if let HirType::GenericParam(name) =
                         &self.hir.types[orig_p_id.0]
                     {
                         if name == gp_name {
@@ -663,7 +675,7 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn follow_id(&self, mut id: TyId) -> TyId {
+    fn follow_id(&self, id: TyId) -> TyId {
         while let HirType::Infer(crate::hir::types::InferTy::Id(infer_id)) = &self.hir.types[id.0] {
             // How to get constraints? We might need to store them in HirModule or somewhere.
             // But actually TypeInfer already finalized types, so they shouldn't be InferTy.
@@ -672,7 +684,7 @@ impl<'a> FunctionTranslator<'a> {
         id
     }
 
-    fn is_block_filled(&self, block: cranelift::prelude::Block) -> bool {
+    fn is_block_filled(&self, block: Block) -> bool {
         if let Some(inst) = self.builder.func.layout.block_insts(block).last() {
             let opcode = self.builder.func.dfg.insts[inst].opcode();
             opcode.is_terminator()
