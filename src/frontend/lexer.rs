@@ -1,83 +1,75 @@
 use logos::Logos;
 
-#[derive(Logos, Debug, Clone, PartialEq)]
-#[logos(skip r"[ \t\r\n\f]+")]
-pub enum Token {
-    #[token("let")]
-    Let,
+use miette::{Diagnostic, NamedSource, SourceSpan};
+use thiserror::Error;
 
-    #[token("=")]
-    Eq,
-    #[token(":")]
-    Colon,
-    #[token(";")]
-    Semi,
-    #[token("+")]
-    Plus,
-    #[token("*")]
-    Star,
-    #[token("(")]
-    LParen,
-    #[token(")")]
-    RParen,
+use miette::Result;
 
-    #[token("true")]
-    True,
-    #[token("false")]
-    False,
+#[derive(Debug, Error, Diagnostic)]
+#[error("{message}")]
+#[diagnostic(code(riddle::lex), help("Check for invalid characters or whether token rules have missed certain cases."))]
+pub struct LexDiag {
+    message: String,
 
-    #[regex(r"[A-Za-z_][A-Za-z0-9_]*", |lex| lex.slice().to_string())]
-    Ident(String),
+    #[source_code]
+    src: NamedSource<String>,
 
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
-    Number(i64),
-
-    #[regex(r#""([^"\\]|\\.)*""#, |lex| {
-        let s = lex.slice();
-        Some(s[1..s.len() - 1].to_string())
-    })]
-    Str(String),
+    #[label("Here")]
+    span: SourceSpan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LexError {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl std::fmt::Display for LexError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "lex error at {}..{}", self.start, self.end)
-    }
-}
-
-impl std::error::Error for LexError {}
-
-pub struct Lexer<'input> {
-    inner: logos::Lexer<'input, Token>,
-}
-
-impl<'input> Lexer<'input> {
-    pub fn new(input: &'input str) -> Self {
+impl LexDiag {
+    pub fn new(filename: impl Into<String>, src: &str, span: std::ops::Range<usize>, message: impl Into<String>) -> Self {
         Self {
-            inner: Token::lexer(input),
+            message: message.into(),
+            src: NamedSource::new(filename.into(), src.to_string()),
+            span: span.into(), // Range<usize> 可以直接转 SourceSpan
         }
     }
 }
 
-impl Iterator for Lexer<'_> {
-    type Item = Result<(usize, Token, usize), LexError>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let tok = self.inner.next()?;
-        let span = self.inner.span();
-
-        Some(match tok {
-            Ok(tok) => Ok((span.start, tok, span.end)),
-            Err(_) => Err(LexError {
-                start: span.start,
-                end: span.end,
-            }),
-        })
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LexError {
+    span: std::ops::Range<usize>,
+}
+impl LexError {
+    fn from_lexer(lex: &mut logos::Lexer<'_, Tok>) -> Self {
+        Self { span: lex.span() }
     }
+}
+
+#[derive(Logos, Debug, PartialEq)]
+#[logos(skip r"[ \t\n\f]+")]
+#[logos(error(LexError, LexError::from_lexer))]
+pub enum Tok {
+    #[token("+")]
+    Plus,
+
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
+    Ident,
+
+    #[regex(r"[0-9]+")]
+    Int,
+}
+
+pub fn lex(filename: &str, src: &str) -> Result<Vec<(Tok, std::ops::Range<usize>)>> {
+    let mut lex = Tok::lexer(src);
+    let mut out = vec![];
+
+    while let Some(item) = lex.next() {
+        match item {
+            Ok(tok) => out.push((tok, lex.span())),
+            Err(e) => {
+                let bad = lex.slice();
+                return Err(LexDiag::new(
+                    filename,
+                    src,
+                    e.span,
+                    format!("Unrecognized input: {bad:?}"),
+                ))?;
+            }
+        }
+    }
+    Ok(out)
 }
