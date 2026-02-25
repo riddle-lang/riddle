@@ -8,6 +8,8 @@ pub enum Token {
 
     #[token("=")]
     Eq,
+    #[token(":")]
+    Colon,
     #[token(";")]
     Semi,
     #[token("+")]
@@ -19,11 +21,22 @@ pub enum Token {
     #[token(")")]
     RParen,
 
+    #[token("true")]
+    True,
+    #[token("false")]
+    False,
+
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
 
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
-    Int(i64),
+    Number(i64),
+
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| {
+        let s = lex.slice();
+        Some(s[1..s.len() - 1].to_string())
+    })]
+    Str(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

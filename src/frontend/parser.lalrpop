@@ -1,0 +1,72 @@
+use crate::frontend::lexer::{LexError, Token};
+use crate::frontend::ast::*;
+
+grammar;
+
+extern {
+    type Location = usize;
+    type Error = LexError;
+
+    enum Token {
+        "let"   => Token::Let,
+        "="     => Token::Eq,
+        ":"     => Token::Colon,
+        ";"     => Token::Semi,
+        "+"     => Token::Plus,
+        "*"     => Token::Star,
+        "("     => Token::LParen,
+        ")"     => Token::RParen,
+        "true"  => Token::True,
+        "false" => Token::False,
+        "ident" => Token::Ident(<String>),
+        "num"   => Token::Number(<i64>),
+        "str"   => Token::Str(<String>),
+    }
+}
+
+pub Module: Module = {
+    <stmts:Stmt*> => Module { stmts },
+};
+
+Stmt: Stmt = {
+    "let" <name:"ident"> <ty:OptType> <init:OptInit> ";" => Stmt::Let { name, ty, init },
+};
+
+OptType: Option<Expr> = {
+    ":" <t:Expr> => Some(t),
+    => None,
+};
+
+OptInit: Option<Expr> = {
+    "=" <e:Expr> => Some(e),
+    => None,
+};
+
+pub Expr: Expr = AddExpr;
+
+AddExpr: Expr = {
+    <l:AddExpr> "+" <r:MulExpr> => Expr::Binary {
+        left: Box::new(l),
+        op: "+".to_string(),
+        right: Box::new(r),
+    },
+    MulExpr,
+};
+
+MulExpr: Expr = {
+    <l:MulExpr> "*" <r:Primary> => Expr::Binary {
+        left: Box::new(l),
+        op: "*".to_string(),
+        right: Box::new(r),
+    },
+    Primary,
+};
+
+Primary: Expr = {
+    <n:"num"> => Expr::Number(n),
+    "true" => Expr::Bool(true),
+    "false" => Expr::Bool(false),
+    <s:"str"> => Expr::String(s),
+    <id:"ident"> => Expr::Var(id),
+    "(" <e:Expr> ")" => e,
+};

@@ -1,2 +1,2 @@
-mod ast;
-mod lexer;
+pub mod ast;
+pub mod lexer;
