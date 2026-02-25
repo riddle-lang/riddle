@@ -3,15 +3,16 @@ name = "riddle"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+build = "build.rs"
 
 [[bin]]
 name = "riddle"
 path = "src/main.rs"
 
 [dependencies]
-pest = "2.8.5"
-pest_derive = "2.8.5"
-cranelift = "0.128.3"
-cranelift-module = "0.128.3"
-cranelift-object = "0.128.3"
-cranelift-native = "0.128.3"
+lalrpop-util = "0.22.2"
+logos = "0.14.4"
+rayon = "1.11.0"
+
+[build-dependencies]
+lalrpop = "0.22.2"
