@@ -4,9 +4,16 @@ mod frontend;
 
 fn main(){
     let src = r#"
-        123
+        123id
     "#;
-    let mut lexer = Lexer::new(src, "2123");
+    let mut lexer = Lexer::new(src, "main.rid");
     let t = lexer.lex();
-    println!("{:?}", t);
+    match t {
+        Ok(o) => {
+            println!("{:?}", o);
+        }
+        Err(e) => {
+            println!("{}", e);
+        }
+    }
 }

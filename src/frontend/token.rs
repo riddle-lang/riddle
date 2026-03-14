@@ -12,14 +12,33 @@ pub(crate) struct Span {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TokenKind {
-    Eof,
+pub enum TokenKind {
     Ident,
     Number,
-    // operator
-    Plus,
-    Minus,
 
+    Plus,      // +
+    Minus,     // -
+    Star,      // *
+    Slash,     // /
+
+    LParen,    // (
+    RParen,    // )
+    LBrace,    // {
+    RBrace,    // }
+
+    Semi,      // ;
+    Comma,     // ,
+
+    Assign,    // =
+    EqEq,      // ==
+    Bang,      // !
+    BangEq,    // !=
+    Lt,        // <
+    Le,        // <=
+    Gt,        // >
+    Ge,        // >=
+
+    Eof,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

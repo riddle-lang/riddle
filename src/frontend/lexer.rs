@@ -4,10 +4,44 @@ pub(crate) struct Lexer<'a> {
     src: &'a str,
     chars: std::str::CharIndices<'a>,
     filename: &'a str,
-    pos: usize,   // byte offset
+    pos: usize, // byte offset
     line: usize,
     col: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LexErrorKind {
+    UnexpectedChar(char),
+    InvalidNumberLiteral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexError {
+    pub kind: LexErrorKind,
+    pub pos: Pos,
+    pub filename: String,
+}
+
+impl std::fmt::Display for LexErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnexpectedChar(c) => write!(f, "unexpected character {:?}", c),
+            Self::InvalidNumberLiteral => write!(f, "invalid number literal"),
+        }
+    }
+}
+
+impl std::fmt::Display for LexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}: error: {}",
+            self.filename, self.pos.line, self.pos.col, self.kind
+        )
+    }
+}
+
+impl std::error::Error for LexError {}
 
 impl<'a> Lexer<'a> {
     pub(crate) fn new(src: &'a str, filename: &'a str) -> Self {
@@ -18,6 +52,14 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
+        }
+    }
+
+    fn error(&self, kind: LexErrorKind) -> LexError {
+        LexError {
+            kind,
+            pos: self.cur_pos(),
+            filename: self.filename.to_string(),
         }
     }
 
@@ -89,7 +131,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_number(&mut self) -> Token {
+    fn lex_number(&mut self) -> Result<Token, LexError> {
         let start = self.cur_pos();
 
         while let Some(c) = self.peek() {
@@ -100,13 +142,47 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        Token {
+        if let Some(c) = self.peek() {
+            if c == '_' || c.is_alphabetic() {
+                return Err(self.error(LexErrorKind::InvalidNumberLiteral));
+            }
+        }
+
+        Ok(Token {
             kind: TokenKind::Number,
+            span: self.make_span(start),
+        })
+    }
+
+
+    fn single_char(&mut self, kind: TokenKind) -> Token {
+        let start = self.cur_pos();
+        self.bump();
+        Token {
+            kind,
             span: self.make_span(start),
         }
     }
 
-    pub(crate) fn lex(&mut self) -> Result<Vec<Token>, ()> {
+    fn one_or_two(
+        &mut self,
+        first: char,
+        second: char,
+        one_kind: TokenKind,
+        two_kind: TokenKind,
+    ) -> Token {
+        let start = self.cur_pos();
+        self.eat(first);
+
+        let kind = if self.eat(second) { two_kind } else { one_kind };
+
+        Token {
+            kind,
+            span: self.make_span(start),
+        }
+    }
+
+    pub(crate) fn lex(&mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens = Vec::new();
 
         while let Some(c) = self.peek() {
@@ -115,43 +191,43 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            let tok = if c == '_' || c.is_alphabetic() {
-                self.lex_ident()
-            } else if c.is_ascii_digit() {
-                self.lex_number()
-            } else {
-                let start = self.cur_pos();
-                match c {
-                    '+' => {
-                        self.bump();
-                        Token {
-                            kind: TokenKind::Plus,
-                            span: self.make_span(start),
-                        }
-                    }
-                    '-' => {
-                        self.bump();
-                        Token {
-                            kind: TokenKind::Minus,
-                            span: self.make_span(start),
-                        }
-                    }
-                    _ => return Err(()),
-                }
+            let tok = match c {
+                'a'..='z' | 'A'..='Z' | '_' => self.lex_ident(),
+                '0'..='9' => self.lex_number()?,
+
+                '+' => self.single_char(TokenKind::Plus),
+                '-' => self.single_char(TokenKind::Minus),
+                '*' => self.single_char(TokenKind::Star),
+                '/' => self.single_char(TokenKind::Slash),
+
+                '(' => self.single_char(TokenKind::LParen),
+                ')' => self.single_char(TokenKind::RParen),
+                '{' => self.single_char(TokenKind::LBrace),
+                '}' => self.single_char(TokenKind::RBrace),
+
+                ';' => self.single_char(TokenKind::Semi),
+                ',' => self.single_char(TokenKind::Comma),
+
+                '=' => self.one_or_two('=', '=', TokenKind::Assign, TokenKind::EqEq),
+                '!' => self.one_or_two('!', '=', TokenKind::Bang, TokenKind::BangEq),
+                '<' => self.one_or_two('<', '=', TokenKind::Lt, TokenKind::Le),
+                '>' => self.one_or_two('>', '=', TokenKind::Gt, TokenKind::Ge),
+
+                _ => return Err(self.error(LexErrorKind::UnexpectedChar(c))),
             };
 
             tokens.push(tok);
         }
 
-        let eof = Token {
+        let pos = self.cur_pos();
+        tokens.push(Token {
             kind: TokenKind::Eof,
             span: Span {
-                start: self.cur_pos(),
-                end: self.cur_pos(),
+                start: pos,
+                end: pos,
             },
-        };
+        });
 
-        tokens.push(eof);
         Ok(tokens)
     }
 
