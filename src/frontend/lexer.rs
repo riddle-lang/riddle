@@ -1,75 +1,161 @@
-use logos::Logos;
+use crate::frontend::token::{Pos, Span, Token, TokenKind};
 
-use miette::{Diagnostic, NamedSource, SourceSpan};
-use thiserror::Error;
-
-use miette::Result;
-
-#[derive(Debug, Error, Diagnostic)]
-#[error("{message}")]
-#[diagnostic(code(riddle::lex), help("Check for invalid characters or whether token rules have missed certain cases."))]
-pub struct LexDiag {
-    message: String,
-
-    #[source_code]
-    src: NamedSource<String>,
-
-    #[label("Here")]
-    span: SourceSpan,
+pub(crate) struct Lexer<'a> {
+    src: &'a str,
+    chars: std::str::CharIndices<'a>,
+    filename: &'a str,
+    pos: usize,   // byte offset
+    line: usize,
+    col: usize,
 }
 
-impl LexDiag {
-    pub fn new(filename: impl Into<String>, src: &str, span: std::ops::Range<usize>, message: impl Into<String>) -> Self {
+impl<'a> Lexer<'a> {
+    pub(crate) fn new(src: &'a str, filename: &'a str) -> Self {
         Self {
-            message: message.into(),
-            src: NamedSource::new(filename.into(), src.to_string()),
-            span: span.into(), // Range<usize> 可以直接转 SourceSpan
+            src,
+            chars: src.char_indices(),
+            filename,
+            pos: 0,
+            line: 1,
+            col: 1,
         }
     }
-}
 
-
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct LexError {
-    span: std::ops::Range<usize>,
-}
-impl LexError {
-    fn from_lexer(lex: &mut logos::Lexer<'_, Tok>) -> Self {
-        Self { span: lex.span() }
+    fn cur_pos(&self) -> Pos {
+        Pos {
+            byte: self.pos,
+            line: self.line,
+            col: self.col,
+        }
     }
-}
 
-#[derive(Logos, Debug, PartialEq)]
-#[logos(skip r"[ \t\n\f]+")]
-#[logos(error(LexError, LexError::from_lexer))]
-pub enum Tok {
-    #[token("+")]
-    Plus,
+    fn peek(&self) -> Option<char> {
+        self.chars.clone().next().map(|(_, c)| c)
+    }
 
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
-    Ident,
+    fn peek2(&self) -> Option<char> {
+        let mut it = self.chars.clone();
+        it.next();
+        it.next().map(|(_, c)| c)
+    }
 
-    #[regex(r"[0-9]+")]
-    Int,
-}
+    fn bump(&mut self) -> Option<char> {
+        let (byte_idx, ch) = self.chars.next()?;
 
-pub fn lex(filename: &str, src: &str) -> Result<Vec<(Tok, std::ops::Range<usize>)>> {
-    let mut lex = Tok::lexer(src);
-    let mut out = vec![];
+        self.pos = byte_idx + ch.len_utf8();
 
-    while let Some(item) = lex.next() {
-        match item {
-            Ok(tok) => out.push((tok, lex.span())),
-            Err(e) => {
-                let bad = lex.slice();
-                return Err(LexDiag::new(
-                    filename,
-                    src,
-                    e.span,
-                    format!("Unrecognized input: {bad:?}"),
-                ))?;
+        if ch == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+
+        Some(ch)
+    }
+
+    fn eat(&mut self, expected: char) -> bool {
+        if self.peek() == Some(expected) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn make_span(&self, start: Pos) -> Span {
+        Span {
+            start,
+            end: self.cur_pos(),
+        }
+    }
+
+    fn lex_ident(&mut self) -> Token {
+        let start = self.cur_pos();
+
+        self.bump();
+
+        while let Some(c) = self.peek() {
+            if c == '_' || c.is_alphanumeric() {
+                self.bump();
+            } else {
+                break;
             }
         }
+
+        Token {
+            kind: TokenKind::Ident,
+            span: self.make_span(start),
+        }
     }
-    Ok(out)
+
+    fn lex_number(&mut self) -> Token {
+        let start = self.cur_pos();
+
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+
+        Token {
+            kind: TokenKind::Number,
+            span: self.make_span(start),
+        }
+    }
+
+    pub(crate) fn lex(&mut self) -> Result<Vec<Token>, ()> {
+        let mut tokens = Vec::new();
+
+        while let Some(c) = self.peek() {
+            if c.is_whitespace() {
+                self.bump();
+                continue;
+            }
+
+            let tok = if c == '_' || c.is_alphabetic() {
+                self.lex_ident()
+            } else if c.is_ascii_digit() {
+                self.lex_number()
+            } else {
+                let start = self.cur_pos();
+                match c {
+                    '+' => {
+                        self.bump();
+                        Token {
+                            kind: TokenKind::Plus,
+                            span: self.make_span(start),
+                        }
+                    }
+                    '-' => {
+                        self.bump();
+                        Token {
+                            kind: TokenKind::Minus,
+                            span: self.make_span(start),
+                        }
+                    }
+                    _ => return Err(()),
+                }
+            };
+
+            tokens.push(tok);
+        }
+
+        let eof = Token {
+            kind: TokenKind::Eof,
+            span: Span {
+                start: self.cur_pos(),
+                end: self.cur_pos(),
+            },
+        };
+
+        tokens.push(eof);
+        Ok(tokens)
+    }
+
+    fn slice_span(&self, span: Span) -> &'a str {
+        &self.src[span.start.byte..span.end.byte]
+    }
 }

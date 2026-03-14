@@ -9,7 +9,4 @@ name = "riddle"
 path = "src/main.rs"
 
 [dependencies]
-logos = "0.16.1"
 rayon = "1"
-thiserror = "1"
-miette = { version = "7", features = ["fancy"] }
