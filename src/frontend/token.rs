@@ -1,48 +1,19 @@
+/// Here, the position of the Span is represented using the Unicode code point
+/// of the source file
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Pos {
-    pub byte: usize,
-    pub line: usize,
-    pub col: usize,
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Span {
-    pub start: Pos,
-    pub end: Pos,
+pub struct Token {
+    span: Span,
+    kind: TokenKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    Ident,
-    Number,
-
-    Plus,      // +
-    Minus,     // -
-    Star,      // *
-    Slash,     // /
-
-    LParen,    // (
-    RParen,    // )
-    LBrace,    // {
-    RBrace,    // }
-
-    Semi,      // ;
-    Comma,     // ,
-
-    Assign,    // =
-    EqEq,      // ==
-    Bang,      // !
-    BangEq,    // !=
-    Lt,        // <
-    Le,        // <=
-    Gt,        // >
-    Ge,        // >=
-
-    Eof,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Token {
-    pub kind: TokenKind,
-    pub span: Span,
+    Identifier,
+    Number
 }

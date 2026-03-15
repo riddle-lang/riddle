@@ -1,3 +1,2 @@
-mod ast;
-pub mod lexer;
-pub mod token;
+mod lexer;
+mod token;
