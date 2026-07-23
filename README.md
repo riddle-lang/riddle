@@ -24,7 +24,9 @@ Riddle 是一门受 Rust 和 Go 启发的实验性编程语言。`v0.1.1` 提供
 
 预编译版本可从 [GitHub Releases](https://github.com/riddle-lang/riddle/releases) 下载。解压对应平台的 zip，并把二进制所在目录加入 `PATH`。
 
-从源码安装需要较新的 Rust stable。Bash：
+从源码安装需要较新的 Rust stable。
+
+Bash：
 
 ```bash
 git clone --depth 1 https://github.com/riddle-lang/riddle.git
