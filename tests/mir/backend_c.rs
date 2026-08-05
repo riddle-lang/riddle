@@ -214,7 +214,7 @@ fn c_backend_does_not_abort_after_never_extern() {
     let generated = CBackend::new().compile(&module).unwrap();
 
     assert!(
-        generated.contains("extern void panic(const char*)"),
+        generated.contains("extern void panic(const char*, size_t)"),
         "{generated}"
     );
     assert!(!generated.contains("riddle_panic"), "{generated}");
@@ -1141,11 +1141,11 @@ fn c_backend_emits_string_externs() {
     let mut backend = CBackend::new();
     let result = backend.compile(&module).unwrap();
     assert!(
-        result.contains("extern size_t str_len(const char*)"),
+        result.contains("extern size_t str_len(const char*, size_t)"),
         "{result}"
     );
     assert!(
-        result.contains("extern uint8_t str_byte(const char*, size_t)"),
+        result.contains("extern uint8_t str_byte(const char*, size_t, size_t)"),
         "{result}"
     );
     assert!(!result.contains("static inline size_t str_len"), "{result}");

@@ -284,7 +284,19 @@ impl CBackend {
                     ext.name
                 ));
             }
-            let params: Vec<String> = ext.params.iter().map(ctype_of_ffi).collect();
+            // Expand &str parameters into (const char*, size_t) pairs so the
+            // C function receives both the pointer and the length.
+            let params: Vec<String> = ext
+                .params
+                .iter()
+                .flat_map(|ty| {
+                    if is_str_ref(ty) {
+                        vec!["const char*".into(), "size_t".into()]
+                    } else {
+                        vec![ctype_of_ffi(ty)]
+                    }
+                })
+                .collect();
             writeln!(
                 out,
                 "extern {} {}({});",
@@ -1102,23 +1114,25 @@ impl CBackend {
             FuncRef::Extern(name) => self.extern_name(name)?.to_owned(),
         };
         let is_extern = matches!(callee, FuncRef::Extern(_));
-        let args = args
-            .iter()
-            .map(|arg| {
-                let name = self.name(*arg).to_owned();
-                let arg_ct = self.ctypes.get(arg.0 as usize).map_or("", String::as_str);
-                if is_extern && arg_ct == "riddle_str" {
-                    if self.is_indirect(*arg) {
-                        format!("{name}->ptr")
-                    } else {
-                        format!("{name}.ptr")
-                    }
+        // For extern calls, expand &str arguments into (ptr, len) pairs to
+        // match the expanded C parameter list.
+        let mut arg_strs = Vec::new();
+        for arg in args {
+            let name = self.name(*arg).to_owned();
+            let arg_ct = self.ctypes.get(arg.0 as usize).map_or("", String::as_str);
+            if is_extern && arg_ct == "riddle_str" {
+                let deref = if self.is_indirect(*arg) {
+                    "->"
                 } else {
-                    name
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+                    "."
+                };
+                arg_strs.push(format!("{name}{deref}ptr"));
+                arg_strs.push(format!("{name}{deref}len"));
+            } else {
+                arg_strs.push(name);
+            }
+        }
+        let args = arg_strs.join(", ");
         if matches!(&inst.ty, Type::Unit) {
             writeln!(out, "  {callee_name}({args});").unwrap();
             self.set_inline(value, "((riddle_unit)0)".into(), "riddle_unit".into());
@@ -1612,6 +1626,14 @@ fn is_slice_ref(ty: &Type) -> bool {
         Type::Ref(inner, _) => matches!(inner.as_ref(), Type::Slice(_)),
         _ => false,
     }
+}
+
+/// Whether this type is `&str` (a reference to str). When passed to C extern
+/// functions this must be expanded into two parameters: `const char*` and
+/// `size_t`, because Riddle's `&str` is a fat pointer but C only sees the
+/// raw pointer unless we explicitly pass the length.
+fn is_str_ref(ty: &Type) -> bool {
+    matches!(ty, Type::Ref(inner, _) if matches!(inner.as_ref(), Type::Str))
 }
 
 fn c_string_parts(value: &str) -> (String, usize) {
