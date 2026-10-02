@@ -1411,3 +1411,217 @@ fn generic_iterator_consumption_and_tree_next_calls() {
         "#;
     assert_ok(source, "");
 }
+
+// ---------------------------------------------------------------------------
+// Recursive types
+//
+// A struct or enum that reaches itself through a reference used to blow the
+// compiler's stack while lowering: the MIR type of `next: Option<&Node>` was
+// expanded field by field, so the expansion never ended. These tests pin the
+// closed-cycle representation end to end.
+
+#[test]
+fn recursive_struct_reference_chain_sums() {
+    assert_ok(
+        r#"
+        struct Node {
+            data: i32,
+            next: Option<&Node>,
+        }
+
+        fun sum(node: &Node) -> i32 {
+            match node.next {
+                Option::Some(next) => node.data + sum(next),
+                Option::None => node.data,
+            }
+        }
+
+        fun main() {
+            let tail = Node { data: 2, next: Option::None };
+            let middle = Node { data: 3, next: Option::Some(&tail) };
+            let head = Node { data: 1, next: Option::Some(&middle) };
+            println!("{}", sum(&head));
+        }
+        "#,
+        "6\n",
+    );
+}
+
+#[test]
+fn recursive_struct_field_access_crosses_two_back_edges() {
+    // Each `next` hop reads a field through the recursive occurrence, so this
+    // pins the offsets the back edge resolves to, not just the first level.
+    assert_ok(
+        r#"
+        struct Node {
+            data: i32,
+            next: Option<&Node>,
+        }
+
+        fun tail_data(node: &Node) -> i32 {
+            match node.next {
+                Option::Some(middle) => match middle.next {
+                    Option::Some(tail) => tail.data,
+                    Option::None => middle.data,
+                },
+                Option::None => node.data,
+            }
+        }
+
+        fun main() {
+            let tail = Node { data: 30, next: Option::None };
+            let middle = Node { data: 20, next: Option::Some(&tail) };
+            let head = Node { data: 10, next: Option::Some(&middle) };
+            println!("{}", tail_data(&head));
+        }
+        "#,
+        "30\n",
+    );
+}
+
+#[test]
+fn recursively_typed_value_survives_heap_promotion() {
+    // `make` returns a reference to its own local, so the nodes are promoted to
+    // the heap; traversal has to keep working across the frame boundary.
+    assert_ok(
+        r#"
+        struct Node {
+            data: i32,
+            next: Option<&Node>,
+        }
+
+        fun make() -> &Node {
+            let tail = Node { data: 2, next: Option::None };
+            let head = Node { data: 1, next: Option::Some(&tail) };
+            &head
+        }
+
+        fun sum(node: &Node) -> i32 {
+            match node.next {
+                Option::Some(next) => node.data + sum(next),
+                Option::None => node.data,
+            }
+        }
+
+        fun main() {
+            println!("{}", sum(make()));
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn mutually_recursive_structs_stay_finite() {
+    assert_ok(
+        r#"
+        struct EvenStep {
+            next: Option<&OddStep>,
+        }
+
+        struct OddStep {
+            next: Option<&EvenStep>,
+        }
+
+        fun odd_len(node: &OddStep) -> i32 {
+            match node.next {
+                Option::Some(next) => 1 + even_len(next),
+                Option::None => 0,
+            }
+        }
+
+        fun even_len(node: &EvenStep) -> i32 {
+            match node.next {
+                Option::Some(next) => 1 + odd_len(next),
+                Option::None => 0,
+            }
+        }
+
+        fun main() {
+            let odd = OddStep { next: Option::None };
+            let even = EvenStep { next: Option::Some(&odd) };
+            println!("{}", even_len(&even));
+        }
+        "#,
+        "1\n",
+    );
+}
+
+#[test]
+fn recursive_enum_payload_traverses() {
+    assert_ok(
+        r#"
+        enum LinkChain {
+            End,
+            Link(i32, &LinkChain),
+        }
+
+        fun total(chain: &LinkChain) -> i32 {
+            match chain {
+                LinkChain::End => 0,
+                LinkChain::Link(value, next) => *value + total(*next),
+            }
+        }
+
+        fun main() {
+            let a = LinkChain::End;
+            let b = LinkChain::Link(2, &a);
+            let c = LinkChain::Link(1, &b);
+            println!("{}", total(&c));
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn recursive_type_may_share_a_name_with_a_std_type() {
+    // `Chain` is also an iterator adapter in std. The self-reference inside the
+    // declaration has to keep pointing at the declaration: lowering used to
+    // resolve field and signature types by name alone, so `&Chain` picked up
+    // std's `Chain` and the program silently read the wrong layout.
+    assert_ok(
+        r#"
+        enum Chain {
+            End,
+            Link(i32, &Chain),
+        }
+
+        fun total(chain: &Chain) -> i32 {
+            match chain {
+                Chain::End => 0,
+                Chain::Link(value, next) => *value + total(*next),
+            }
+        }
+
+        fun main() {
+            let a = Chain::End;
+            let b = Chain::Link(2, &a);
+            let c = Chain::Link(1, &b);
+            println!("{}", total(&c));
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn a_type_may_share_a_name_with_a_std_type() {
+    // std declares an iterator adapter named `Chain`, and every package's items
+    // share one scope in the graph. `impl` blocks used to be attached to the
+    // first struct with that name, so std's `impl Iterator for Chain<I, J, T>`
+    // landed on this type and std's own sources reported a bogus `E0032`.
+    assert_ok(
+        r#"
+        struct Chain {
+            data: i32,
+        }
+
+        fun main() {
+            let c = Chain { data: 7 };
+            println!("{}", c.data);
+        }
+        "#,
+        "7\n",
+    );
+}

@@ -1437,3 +1437,539 @@ fn broken_contract_falls_back_to_conservative() {
         result.diagnostics
     );
 }
+
+fn assert_has_code(result: &move_checker::AnalysisResult, code: &str) {
+    assert!(
+        result.diagnostics.iter().any(|d| d.code == code),
+        "expected {code}, got {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn rejects_assigning_a_field_through_a_shared_reference_parameter() {
+    // `&T` says the referent is not writable. Field assignment through the
+    // borrow went unchecked, so this mutated the caller's value.
+    let result = analyze(
+        r#"
+        struct Sample { n: i32 }
+
+        fun mutate(r: &Sample) {
+            r.n = 5;
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0309");
+}
+
+#[test]
+fn allows_assigning_a_field_through_a_mutable_reference_parameter() {
+    is_clean(
+        r#"
+        struct Sample { n: i32 }
+
+        fun mutate(r: &mut Sample) {
+            r.n = 5;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn rejects_assigning_a_field_through_a_shared_self_receiver() {
+    let result = analyze(
+        r#"
+        struct Counter { hits: i32 }
+
+        impl Counter {
+            fun bump(&self) {
+                self.hits += 1;
+            }
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0309");
+}
+
+#[test]
+fn rejects_a_mutable_method_call_on_a_field_of_a_shared_receiver() {
+    // The receiver of `self.buffer.push(..)` is reached through `&self`, so the
+    // `&mut` the method needs is taken through a shared borrow.
+    let result = analyze(
+        r#"
+        struct Buffer { len: usize }
+
+        impl Buffer {
+            fun push(&mut self, value: i32) {
+                self.len += value as usize;
+            }
+        }
+
+        struct Holder { buffer: Buffer }
+
+        impl Holder {
+            fun record(&self) {
+                self.buffer.push(1);
+            }
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0309");
+}
+
+#[test]
+fn allows_writing_through_a_raw_pointer_derived_from_a_shared_reference() {
+    // Raw pointers stay the documented `unsafe` escape hatch: reaching through
+    // them is governed by the unsafe rules, not by the reference's mutability.
+    is_clean(
+        r#"
+        struct Sample { n: i32 }
+
+        fun mutate(r: &Sample) {
+            unsafe {
+                let p = r as *const Sample as *mut Sample;
+                (*p).n = 5;
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn casting_a_mutable_reference_to_a_pointer_keeps_the_reference_usable() {
+    // A cast reads the pointer out of the reference; it does not consume it.
+    // Recording a move here made the later `*r = 1` report E0100.
+    is_clean(
+        r#"
+        fun write(r: &mut i32) -> i32 {
+            let p = r as *const i32;
+            *r = 1;
+            unsafe {
+                *p
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn binding_a_mutable_reference_still_moves_it() {
+    // The cast exemption must not turn into a general "references are Copy"
+    // rule: binding one really does move it.
+    let result = analyze(
+        r#"
+        fun take(r: &mut i32) {
+            let forwarded = r;
+            *forwarded = 1;
+            *r = 2;
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0100");
+}
+
+#[test]
+fn a_diverging_branch_does_not_contribute_its_moves_to_the_join() {
+    // `f` is only moved on the path that returns, so the fall-through call is
+    // fine. Merging the `then` exit unconditionally reported E0100 here.
+    is_clean(
+        r#"
+        fun apply<X>(flag: bool, f: impl FnOnce(i32) -> X) -> X {
+            if flag {
+                return f(1);
+            }
+            f(2)
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_falling_through_branch_still_contributes_its_moves_to_the_join() {
+    // The same shape without the early return: the `then` path reaches the
+    // second call with `f` already moved.
+    let result = analyze(
+        r#"
+        fun apply<X>(flag: bool, f: impl FnOnce(i32) -> X) -> i32 {
+            if flag {
+                let _ = f(1);
+            }
+            let _ = f(2);
+            0
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0100");
+}
+
+#[test]
+fn a_diverging_match_arm_does_not_contribute_its_moves_to_the_join() {
+    // The same rule as the `if` case, one arm at a time: the arm that returns
+    // never reaches the call after the `match`.
+    is_clean(
+        r#"
+        fun pick<X>(flag: bool, g: impl FnOnce(i32) -> X) -> i32 {
+            match flag {
+                true => {
+                    let _ = g(1);
+                    return 0;
+                }
+                false => {}
+            }
+            let _ = g(2);
+            1
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_falling_through_match_arm_still_contributes_its_moves_to_the_join() {
+    let result = analyze(
+        r#"
+        fun pick<X>(flag: bool, g: impl FnOnce(i32) -> X) -> i32 {
+            match flag {
+                true => {
+                    let _ = g(1);
+                }
+                false => {}
+            }
+            let _ = g(2);
+            1
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0100");
+}
+
+#[test]
+fn a_mut_field_is_writable_through_a_shared_self_receiver() {
+    is_clean(
+        r#"
+        struct Counter { mut hits: i32, plain: i32 }
+
+        impl Counter {
+            fun bump(&self) {
+                self.hits += 1;
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_plain_field_is_not_writable_through_a_shared_self_receiver() {
+    let result = analyze(
+        r#"
+        struct Counter { mut hits: i32, plain: i32 }
+
+        impl Counter {
+            fun set(&self) {
+                self.plain = 1;
+            }
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0309");
+}
+
+#[test]
+fn a_mutable_method_call_on_a_mut_field_of_a_shared_receiver_is_allowed() {
+    // `self.log.push(..)` has no `&mut` expression to reject: the borrow is the
+    // call's own receiver argument, so it lives exactly as long as the call.
+    is_clean(
+        r#"
+        struct Buffer { mut len: usize }
+
+        impl Buffer {
+            fun push(&mut self) {
+                self.len += 1;
+            }
+        }
+
+        struct Holder { mut buffer: Buffer }
+
+        impl Holder {
+            fun record(&self) {
+                self.buffer.push();
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_mut_field_borrow_cannot_be_bound() {
+    // Binding the `&mut` would let it outlive the call, and two of them could
+    // then alias. Only a call receiver or argument may take it.
+    let result = analyze(
+        r#"
+        struct Counter { mut hits: i32 }
+
+        fun bind(counter: &Counter) {
+            let target = &mut counter.hits;
+            *target = 1;
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0309");
+}
+
+#[test]
+fn a_mut_field_borrow_cannot_be_returned() {
+    let result = analyze(
+        r#"
+        struct Counter { mut hits: i32 }
+
+        fun leak(counter: &Counter) -> &mut i32 {
+            &mut counter.hits
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0309");
+}
+
+#[test]
+fn a_mut_field_borrow_is_allowed_as_a_call_argument() {
+    is_clean(
+        r#"
+        struct Counter { mut hits: i32 }
+
+        fun add_to(target: &mut i32) {
+            *target += 1;
+        }
+
+        fun pass(counter: &Counter) {
+            add_to(&mut counter.hits);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_shared_borrow_of_the_receiver_does_not_block_a_mut_field_write() {
+    // A shared borrow of the whole value does not freeze a `mut` field: a
+    // `&self` method may still update it, and the borrow observes the change.
+    is_clean(
+        r#"
+        struct Counter { mut hits: i32 }
+
+        impl Counter {
+            fun bump(&self) {
+                self.hits += 1;
+            }
+
+            fun read(&self) -> i32 {
+                self.hits
+            }
+        }
+
+        fun f() {
+            let counter = Counter { hits: 0 };
+            let view = &counter;
+            counter.bump();
+            let _ = view.read();
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_borrow_into_a_mut_field_blocks_a_shared_method_that_writes_it() {
+    // The method's write can move what the borrow points at, and the callee's
+    // own checks cannot see this caller's loan.
+    let result = analyze(
+        r#"
+        struct Inner { value: i32 }
+
+        struct Holder { mut inner: Inner }
+
+        impl Holder {
+            fun bump(&self) {
+                self.inner.value += 1;
+            }
+        }
+
+        fun f() {
+            let holder = Holder { inner: Inner { value: 0 } };
+            let held = &holder.inner.value;
+            holder.bump();
+            let _ = *held;
+        }
+        "#,
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E0300" || d.code == "E0303"),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn a_shared_method_writing_a_different_mut_field_does_not_conflict() {
+    // The callee's interior-write summary names `a`, so a borrow into `b` is
+    // unrelated. Claiming every `mut` field of the receiver rejected this.
+    is_clean(
+        r#"
+        struct Inner { value: i32 }
+
+        struct Holder { mut a: Inner, mut b: Inner }
+
+        impl Holder {
+            fun touch_a(&self) {
+                self.a.value += 1;
+            }
+        }
+
+        fun f() {
+            let holder = Holder { a: Inner { value: 0 }, b: Inner { value: 0 } };
+            let held = &holder.b.value;
+            holder.touch_a();
+            let _ = *held;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_shared_method_writing_no_mut_field_does_not_conflict() {
+    is_clean(
+        r#"
+        struct Inner { value: i32 }
+
+        struct Holder { mut a: Inner, mut b: Inner }
+
+        impl Holder {
+            fun read_b(&self) -> i32 {
+                self.b.value
+            }
+        }
+
+        fun f() {
+            let holder = Holder { a: Inner { value: 0 }, b: Inner { value: 0 } };
+            let held = &holder.b.value;
+            let _ = holder.read_b();
+            let _ = *held;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_free_function_writing_a_mut_field_blocks_a_borrow_into_it() {
+    // The write travels through a `&T` argument, not a receiver: a free
+    // function can move the field's storage just as a `&self` method can.
+    let result = analyze(
+        r#"
+        struct Inner { value: i32 }
+
+        struct Holder { mut a: Inner }
+
+        fun write_a(holder: &Holder) {
+            holder.a.value += 1;
+        }
+
+        fun f() {
+            let holder = Holder { a: Inner { value: 0 } };
+            let held = &holder.a.value;
+            write_a(&holder);
+            let _ = *held;
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0300");
+}
+
+#[test]
+fn another_types_method_writing_a_mut_field_blocks_a_borrow_into_it() {
+    let result = analyze(
+        r#"
+        struct Inner { value: i32 }
+
+        struct Holder { mut a: Inner }
+
+        struct Sink { count: i32 }
+
+        impl Sink {
+            fun absorb(&mut self, holder: &Holder) {
+                holder.a.value += 1;
+                self.count += 1;
+            }
+        }
+
+        fun f() {
+            let holder = Holder { a: Inner { value: 0 } };
+            let held = &holder.a.value;
+            let mut sink = Sink { count: 0 };
+            sink.absorb(&holder);
+            let _ = *held;
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0300");
+}
+
+#[test]
+fn an_indirectly_written_mut_field_is_still_reported() {
+    // `bump` writes nothing itself — it forwards to `helper`. The summary has
+    // to follow the call, or the write would be invisible to the caller.
+    let result = analyze(
+        r#"
+        struct Inner { value: i32 }
+
+        struct Holder { mut inner: Inner }
+
+        impl Holder {
+            fun bump(&self) {
+                self.helper();
+            }
+
+            fun helper(&self) {
+                self.inner.value += 1;
+            }
+        }
+
+        fun f() {
+            let holder = Holder { inner: Inner { value: 0 } };
+            let held = &holder.inner.value;
+            holder.bump();
+            let _ = *held;
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0300");
+}
+
+#[test]
+fn a_mut_field_write_through_a_mutable_borrow_reaches_the_caller() {
+    // `push` takes `&mut self`, so the callee's own summary is empty — the
+    // write is implied by the borrow the caller handed over.
+    let result = analyze(
+        r#"
+        struct Buffer { len: usize }
+
+        impl Buffer {
+            fun push(&mut self) {
+                self.len += 1;
+            }
+        }
+
+        struct Holder { mut buffer: Buffer }
+
+        fun forward(holder: &Holder) {
+            holder.buffer.push();
+        }
+
+        fun f() {
+            let holder = Holder { buffer: Buffer { len: 0 } };
+            let held = &holder.buffer.len;
+            forward(&holder);
+            let _ = *held;
+        }
+        "#,
+    );
+    assert_has_code(&result, "E0300");
+}

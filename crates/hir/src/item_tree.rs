@@ -256,6 +256,9 @@ pub struct HirStructField {
     pub name: Name,
     pub name_range: TextRange,
     pub visibility: Visibility,
+    /// `mut name: T` — writable through a shared reference to the containing
+    /// value, so a `&self` method can update it.
+    pub is_mut: bool,
     pub ty: HirTypeRef,
     pub ty_range: TextRange,
     pub attrs: Vec<HirAttr>,

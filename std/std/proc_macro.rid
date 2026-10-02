@@ -98,7 +98,7 @@ struct ProcWireParser {
 }
 
 unsafe extern "C" {
-    safe fun rgc_alloc(size: usize) -> *mut u8;
+    safe fun riddle_alloc_bytes(size: usize) -> *mut u8;
     safe fun rgc_free(data: *mut u8);
     safe fun riddle_proc_call_site_start() -> usize;
     safe fun riddle_proc_call_site_end() -> usize;
@@ -211,7 +211,7 @@ impl Span {
 
 impl Group {
     pub fun new(delimiter: Delimiter, stream: TokenStream) -> Group {
-        let mut storage = rgc_alloc(size_of::<TokenStream>()) as *mut TokenStream;
+        let mut storage = riddle_alloc_bytes(size_of::<TokenStream>()) as *mut TokenStream;
         unsafe {
             storage[0usize] = stream;
         }
@@ -469,7 +469,7 @@ impl ToTokens for str {
 
 impl TokenStream {
     fun allocate(trees: Vector<TokenTree>) -> *mut TokenStreamData {
-        let mut data = rgc_alloc(size_of::<TokenStreamData>()) as *mut TokenStreamData;
+        let mut data = riddle_alloc_bytes(size_of::<TokenStreamData>()) as *mut TokenStreamData;
         unsafe {
             data[0usize] = TokenStreamData {
                 references: 1usize,

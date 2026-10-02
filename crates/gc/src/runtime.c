@@ -11,6 +11,7 @@
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef RGC_MIN_HEAP
 #define RGC_MIN_HEAP (1024u * 1024u)
@@ -24,20 +25,40 @@
 #define RGC_NOINLINE
 #endif
 
+/* Small payloads are carved out of large chunks into fixed size classes, so
+   recycling a small object is a free-list push/pop instead of a malloc/free
+   round trip. Everything above RGC_SMALL_LIMIT goes straight to malloc.
+   Class size is a multiple of RGC_CLASS_STEP, which keeps every carved block
+   aligned to 16 bytes; malloc itself supplies the alignment of the chunk. */
+#define RGC_CLASS_STEP 16u
+#define RGC_SMALL_LIMIT 1024u
+#define RGC_CLASS_COUNT (RGC_SMALL_LIMIT / RGC_CLASS_STEP)
+#define RGC_LARGE_CLASS ((uint16_t)0xffffu)
+#define RGC_CHUNK_SIZE (64u * 1024u)
+
+/* A descriptor is a flat uint32 array published by the compiler:
+     descriptor[0]            number of GC pointer slots
+     descriptor[1 + i]        byte offset of slot i inside the payload
+   NULL means "unknown layout": the payload is scanned conservatively, word by
+   word, exactly like a runtime without compiler support. Descriptors are
+   validated on registration, and anything malformed degrades to NULL so a
+   codegen bug can never make the collector read out of bounds. */
+
 typedef struct RgcHeader RgcHeader;
 typedef struct RgcMarkStack RgcMarkStack;
 
 /* Object headers live out-of-band in the registry array instead of in front
-   of each payload: rgc_alloc hands out the malloc block itself (suitably
-   aligned for any fundamental type per C11 7.22.3) and the collector only
-   ever scans payloads it has registered. `next` is dual purpose: while
-   occupied it links the address-hash bucket chain, while free it links the
-   recycled-slot free list. Links store slot indices +1 encoded, so 0
-   terminates a chain and slot 0 stays addressable. */
+   of each payload: rgc_alloc hands out a suitably aligned block and the
+   collector only ever scans payloads it has registered. `next` is dual
+   purpose: while occupied it links the address-hash bucket chain, while free
+   it links the recycled-slot free list. Links store slot indices +1 encoded,
+   so 0 terminates a chain and slot 0 stays addressable. */
 struct RgcHeader {
     uintptr_t start;
     size_t size;
+    const uint32_t *desc;
     uint32_t next;
+    uint16_t size_class;
     unsigned char marked;
     unsigned char occupied;
 };
@@ -77,19 +98,114 @@ static size_t rgc_live_bytes = 0;
 static size_t rgc_next_collect = RGC_MIN_HEAP;
 static void *rgc_stack_bottom = NULL;
 
+/* Free lists for the small size classes plus chunk accounting. Free blocks
+   link through their own first word, which is safe because only occupied
+   slots are ever scanned. */
+static void *rgc_free_lists[RGC_CLASS_COUNT];
+static size_t rgc_chunk_count = 0;
+static size_t rgc_heap_bytes = 0;
+
+/* Always maintained (a handful of increments per allocation and mark) and
+   readable through the rgc_stat_* accessors. RGC_DEBUG_STATS=1 additionally
+   prints one stderr line per collection. */
+static size_t rgc_stats_total_objects = 0;
+static size_t rgc_stats_collections = 0;
+static size_t rgc_stats_typed_objects = 0;
+static size_t rgc_stats_conservative_objects = 0;
+static size_t rgc_stats_typed_marks = 0;
+static size_t rgc_stats_conservative_marks = 0;
+static size_t rgc_stats_collected_objects = 0;
+static size_t rgc_stats_collected_bytes = 0;
+static size_t rgc_stats_marked_objects = 0;
+static size_t rgc_stats_typed_payload_scans = 0;
+static size_t rgc_stats_conservative_payload_scans = 0;
+static size_t rgc_stats_last_mark_ns = 0;
+static size_t rgc_stats_last_sweep_ns = 0;
+
 static void rgc_panic(void) {
     exit(EXIT_FAILURE);
 }
 
 void rgc_init(void *stack_bottom);
-void *rgc_alloc(size_t size);
+void *rgc_alloc(size_t size, const uint32_t *descriptor);
+void *riddle_alloc_bytes(size_t size);
 void *rgc_realloc(void *ptr, size_t size);
 void rgc_free(void *ptr);
 RGC_NOINLINE void rgc_collect(void);
 
+static size_t rgc_capacity_of(size_t size, uint16_t size_class) {
+    if (size_class == RGC_LARGE_CLASS) {
+        return size;
+    }
+    return ((size_t)size_class + 1u) * RGC_CLASS_STEP;
+}
+
+static size_t rgc_object_capacity(const RgcHeader *object) {
+    return rgc_capacity_of(object->size, object->size_class);
+}
+
+#if defined(_WIN32)
+/* QueryPerformanceCounter backs the collection timing statistics. */
+#include <windows.h>
+#endif
+
+static uint64_t rgc_now_ns(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    if (frequency.QuadPart <= 0) {
+        return 0u;
+    }
+    return (uint64_t)((double)counter.QuadPart * 1000000000.0 / (double)frequency.QuadPart);
+#else
+    struct timespec stamp;
+    if (clock_gettime(CLOCK_MONOTONIC, &stamp) != 0) {
+        return 0u;
+    }
+    return (uint64_t)stamp.tv_sec * UINT64_C(1000000000) + (uint64_t)stamp.tv_nsec;
+#endif
+}
+
+static const uint32_t *rgc_validate_descriptor(const uint32_t *descriptor, size_t size) {
+    uint32_t slots;
+    uint32_t index;
+
+    if (!descriptor) {
+        return NULL;
+    }
+    slots = descriptor[0];
+    if ((size_t)slots > size / sizeof(uintptr_t)) {
+        return NULL;
+    }
+    for (index = 0u; index < slots; ++index) {
+        if ((size_t)descriptor[1u + index] + sizeof(uintptr_t) > size) {
+            return NULL;
+        }
+    }
+    return descriptor;
+}
+
+static void rgc_zero_pointer_slots(void *block, const uint32_t *descriptor, size_t size) {
+    uint32_t slots;
+    uint32_t index;
+
+    if (!descriptor) {
+        return;
+    }
+    slots = descriptor[0];
+    for (index = 0u; index < slots; ++index) {
+        size_t offset = (size_t)descriptor[1u + index];
+        if (offset + sizeof(uintptr_t) <= size) {
+            memset((unsigned char *)block + offset, 0, sizeof(uintptr_t));
+        }
+    }
+}
+
 static size_t rgc_hash_of(uintptr_t start) {
-    /* Multiplicative (Knuth) hashing; malloc payloads are at least 8-byte
-       aligned, so the zeroed low bits are dropped before mixing. */
+    /* Multiplicative (Knuth) hashing; payloads are at least 16-byte aligned,
+       so the zeroed low bits are dropped before mixing. */
     return (size_t)((start >> 3u) * (uintptr_t)2654435761u) & rgc_hash_mask;
 }
 
@@ -128,7 +244,7 @@ static void rgc_hash_insert(uint32_t slot) {
     size_t bucket;
 
     /* Grow at 75% load; the +1 accounts for the slot about to be chained.
-       rgc_hash_grow rehashes occupied slots only, so `slot` is chained
+       rgc_hash_grow rehashes occupied slots only, so this slot is chained
        exactly once, below. */
     if (!rgc_hash || rgc_object_count + 1u > buckets - buckets / 4u) {
         rgc_hash_grow();
@@ -167,7 +283,12 @@ static RgcHeader *rgc_find_exact(const void *ptr) {
     return NULL;
 }
 
-static void rgc_register(uintptr_t start, size_t size) {
+static void rgc_register(
+    uintptr_t start,
+    size_t size,
+    const uint32_t *descriptor,
+    uint16_t size_class
+) {
     uint32_t slot;
     RgcHeader *object;
 
@@ -197,6 +318,8 @@ static void rgc_register(uintptr_t start, size_t size) {
     object = &rgc_headers[slot];
     object->start = start;
     object->size = size;
+    object->desc = descriptor;
+    object->size_class = size_class;
     object->marked = 0;
     object->occupied = 0;
     object->next = 0u;
@@ -205,9 +328,137 @@ static void rgc_register(uintptr_t start, size_t size) {
        cannot pick this slot up twice. */
     object->occupied = 1;
     rgc_object_count += 1u;
+    rgc_stats_total_objects += 1u;
+    if (descriptor) {
+        rgc_stats_typed_objects += 1u;
+    } else {
+        rgc_stats_conservative_objects += 1u;
+    }
 }
 
-static void rgc_mark_push(RgcMarkStack *stack, const void *ptr);
+/* Thread a freed small block onto its size-class free list. */
+static void rgc_small_release(void *block, uint16_t size_class) {
+    void *next = rgc_free_lists[size_class];
+    memcpy(block, &next, sizeof(next));
+    rgc_free_lists[size_class] = block;
+}
+
+/* Carve a fresh chunk into class-sized blocks and hand block 0 to the
+   caller. Chunks are never returned to malloc: the collector owns them and
+   recycles blocks through the free lists. */
+static void *rgc_chunk_refill(uint16_t size_class) {
+    size_t class_size = ((size_t)size_class + 1u) * RGC_CLASS_STEP;
+    size_t count = RGC_CHUNK_SIZE / class_size;
+    unsigned char *chunk;
+    size_t index;
+
+    if (count == 0u) {
+        count = 1u;
+    }
+    chunk = (unsigned char *)malloc(count * class_size);
+    if (!chunk) {
+        return NULL;
+    }
+    rgc_chunk_count += 1u;
+    rgc_heap_bytes += count * class_size;
+    for (index = 1u; index < count; ++index) {
+        rgc_small_release(chunk + index * class_size, size_class);
+    }
+    return chunk;
+}
+
+static void *rgc_small_alloc(uint16_t size_class) {
+    void *block = rgc_free_lists[size_class];
+    if (block) {
+        void *next;
+        memcpy(&next, block, sizeof(next));
+        rgc_free_lists[size_class] = next;
+        return block;
+    }
+    return rgc_chunk_refill(size_class);
+}
+
+/* Return any block (small or large) to its allocator. */
+static void rgc_release_block(RgcHeader *object) {
+    if (object->size_class == RGC_LARGE_CLASS) {
+        free((void *)object->start);
+        rgc_heap_bytes -= object->size;
+        return;
+    }
+    rgc_small_release((void *)object->start, object->size_class);
+}
+
+static void rgc_mark_stack_push(RgcMarkStack *stack, RgcHeader *object, int typed) {
+    if (!object || object->marked) {
+        return;
+    }
+
+    object->marked = 1;
+    rgc_stats_marked_objects += 1u;
+    if (typed) {
+        rgc_stats_typed_marks += 1u;
+    } else {
+        rgc_stats_conservative_marks += 1u;
+    }
+    if (stack->len == stack->cap) {
+        size_t next_cap = stack->cap ? stack->cap * 2u : 64u;
+        if (next_cap < stack->cap || next_cap > SIZE_MAX / sizeof(RgcHeader *)) {
+            rgc_panic();
+        }
+        RgcHeader **next = (RgcHeader **)realloc(stack->items, next_cap * sizeof(RgcHeader *));
+        if (!next) {
+            rgc_panic();
+        }
+        stack->items = next;
+        stack->cap = next_cap;
+    }
+    stack->items[stack->len++] = object;
+}
+
+/* Object lookup during marking. Interior pointers (e.g. a slice into the
+   middle of a buffer) must resolve to their owning object, which needs a
+   predecessor search by address: a binary search over the address-sorted
+   index is O(log n). Between collections the index is stale, so every
+   non-marking lookup (rgc_free, rgc_realloc) uses the hash table instead. */
+static RgcHeader *rgc_find_object(const void *ptr) {
+    uintptr_t needle = (uintptr_t)ptr;
+    size_t lo = 0;
+    size_t hi = rgc_sorted_len;
+    RgcHeader *object;
+
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        if (rgc_headers[rgc_sorted[mid] - 1u].start <= needle) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0u) {
+        return NULL;
+    }
+    object = &rgc_headers[rgc_sorted[lo - 1u] - 1u];
+    if (needle - object->start < object->size) {
+        return object;
+    }
+    return NULL;
+}
+
+/* Conservative edge: any word that looks like an address. */
+static void rgc_mark_push(RgcMarkStack *stack, const void *ptr) {
+    rgc_mark_stack_push(stack, rgc_find_object(ptr), 0);
+}
+
+/* Typed edge: compiler-declared pointer slots normally hold an exact base
+   pointer, so try the O(1) hash first and only fall back to the binary
+   search for interior pointers. */
+static void rgc_mark_resolved(RgcMarkStack *stack, const void *ptr) {
+    RgcHeader *object = rgc_find_exact(ptr);
+    if (!object) {
+        object = rgc_find_object(ptr);
+    }
+    rgc_mark_stack_push(stack, object, 1);
+}
 
 static void rgc_mark_range(RgcMarkStack *stack, const void *a, const void *b) {
     uintptr_t start = (uintptr_t)a;
@@ -228,6 +479,48 @@ static void rgc_mark_range(RgcMarkStack *stack, const void *a, const void *b) {
         memcpy(&candidate, (const void *)cursor, sizeof(candidate));
         rgc_mark_push(stack, (const void *)candidate);
     }
+}
+
+/* Follow the compiler-published layout when there is one, otherwise scan
+   the payload word by word. */
+static void rgc_mark_payload(RgcMarkStack *stack, RgcHeader *object) {
+    const uint32_t *descriptor = object->desc;
+    uintptr_t start = object->start;
+    uint32_t slots;
+    uint32_t index;
+
+    if (!descriptor) {
+        rgc_stats_conservative_payload_scans += 1u;
+        rgc_mark_range(stack, (const void *)start, (const void *)(start + object->size));
+        return;
+    }
+    rgc_stats_typed_payload_scans += 1u;
+    slots = descriptor[0];
+    for (index = 0u; index < slots; ++index) {
+        uintptr_t word = 0;
+        memcpy(&word, (const void *)(start + descriptor[1u + index]), sizeof(word));
+        if (word != 0u) {
+            rgc_mark_resolved(stack, (const void *)word);
+        }
+    }
+}
+
+static void rgc_mark_roots(
+    const void *a,
+    const void *b,
+    const void *registers,
+    size_t registers_size
+) {
+    RgcMarkStack stack = {0};
+
+    rgc_mark_range(&stack, registers, (const char *)registers + registers_size);
+    rgc_mark_range(&stack, a, b);
+    while (stack.len) {
+        RgcHeader *object = stack.items[--stack.len];
+        rgc_mark_payload(&stack, object);
+    }
+
+    free(stack.items);
 }
 
 /* qsort comparator over slot indices; the base array is a file-scope
@@ -269,83 +562,12 @@ static void rgc_build_sorted(void) {
     qsort(rgc_sorted, len, sizeof(uint32_t), rgc_sorted_cmp);
 }
 
-/* Object lookup during marking. Interior pointers (e.g. a slice into the
-   middle of a buffer) must resolve to their owning object, which needs a
-   predecessor search by address: a binary search over the address-sorted
-   index is O(log n). Between collections the index is stale, so every
-   non-marking lookup (rgc_free, rgc_realloc) uses the hash table instead. */
-static RgcHeader *rgc_find_object(const void *ptr) {
-    uintptr_t needle = (uintptr_t)ptr;
-    size_t lo = 0;
-    size_t hi = rgc_sorted_len;
-    RgcHeader *object;
-
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2u;
-        if (rgc_headers[rgc_sorted[mid] - 1u].start <= needle) {
-            lo = mid + 1u;
-        } else {
-            hi = mid;
-        }
-    }
-    if (lo == 0u) {
-        return NULL;
-    }
-    object = &rgc_headers[rgc_sorted[lo - 1u] - 1u];
-    if (needle - object->start < object->size) {
-        return object;
-    }
-    return NULL;
-}
-
-static void rgc_mark_push(RgcMarkStack *stack, const void *ptr) {
-    RgcHeader *object = rgc_find_object(ptr);
-    if (!object || object->marked) {
-        return;
-    }
-
-    object->marked = 1;
-    if (stack->len == stack->cap) {
-        size_t next_cap = stack->cap ? stack->cap * 2u : 64u;
-        if (next_cap < stack->cap || next_cap > SIZE_MAX / sizeof(RgcHeader *)) {
-            rgc_panic();
-        }
-        RgcHeader **next = (RgcHeader **)realloc(stack->items, next_cap * sizeof(RgcHeader *));
-        if (!next) {
-            rgc_panic();
-        }
-        stack->items = next;
-        stack->cap = next_cap;
-    }
-    stack->items[stack->len++] = object;
-}
-
-static void rgc_mark_roots(
-    const void *a,
-    const void *b,
-    const void *registers,
-    size_t registers_size
-) {
-    RgcMarkStack stack = {0};
-
-    rgc_mark_range(&stack, registers, (const char *)registers + registers_size);
-    rgc_mark_range(&stack, a, b);
-    while (stack.len) {
-        RgcHeader *object = stack.items[--stack.len];
-        rgc_mark_range(
-            &stack,
-            (const void *)object->start,
-            (const void *)(object->start + object->size)
-        );
-    }
-
-    free(stack.items);
-}
-
 static void rgc_sweep(void) {
     size_t i;
+    size_t live = 0;
+    size_t collected_objects = 0;
+    size_t collected_bytes = 0;
 
-    rgc_live_bytes = 0;
     for (i = 0; i < rgc_header_len; ++i) {
         RgcHeader *object = &rgc_headers[i];
         if (!object->occupied) {
@@ -353,16 +575,28 @@ static void rgc_sweep(void) {
         }
         if (object->marked) {
             object->marked = 0;
-            rgc_live_bytes += object->size;
+            live += rgc_object_capacity(object);
             continue;
         }
         rgc_hash_remove((uint32_t)i);
-        free((void *)object->start);
+        collected_objects += 1u;
+        collected_bytes += rgc_object_capacity(object);
+        rgc_release_block(object);
+        if (object->desc) {
+            rgc_stats_typed_objects -= 1u;
+        } else {
+            rgc_stats_conservative_objects -= 1u;
+        }
+        object->desc = NULL;
         object->occupied = 0;
         object->next = rgc_free_slot;
         rgc_free_slot = (uint32_t)(i + 1u);
         rgc_object_count -= 1u;
     }
+
+    rgc_live_bytes = live;
+    rgc_stats_collected_objects = collected_objects;
+    rgc_stats_collected_bytes = collected_bytes;
 
     /* Grow the next-collection threshold with the surviving set so
        steady-state programs do not re-collect at a fixed boundary. */
@@ -376,9 +610,10 @@ static void rgc_sweep(void) {
 
 /* ---- optional collection diagnostics ----
    Set RGC_DEBUG_STATS=1 in the environment to print one stderr line per
-   collection: live bytes, live objects, and the next threshold. The flag
-   is read once and off by default, so ordinary runs stay silent and
-   deterministic. */
+   collection: live/collected bytes, object counts, mark and sweep time, and
+   how many mark edges came from typed descriptor slots versus conservative
+   word scans. The flag is read once and off by default, so ordinary runs
+   stay silent and deterministic. */
 #include <stdio.h>
 static int rgc_debug_stats(void) {
     static int enabled = -1;
@@ -439,25 +674,47 @@ RGC_NOINLINE void rgc_collect(void) {
         return;
     }
 
+    uint64_t mark_start = rgc_now_ns();
+    rgc_stats_marked_objects = 0;
     rgc_build_sorted();
     rgc_mark_roots(&registers, rgc_stack_bottom, &registers, sizeof(registers));
+    uint64_t mark_end = rgc_now_ns();
     rgc_sweep();
+    uint64_t sweep_end = rgc_now_ns();
+
+    rgc_stats_last_mark_ns = (size_t)(mark_end - mark_start);
+    rgc_stats_last_sweep_ns = (size_t)(sweep_end - mark_end);
+    rgc_stats_collections += 1u;
 
     if (rgc_debug_stats()) {
-        static size_t collections = 0;
-        collections += 1u;
         fprintf(
             stderr,
-            "rgc: collection %zu: %zu live bytes in %zu objects, next threshold %zu\n",
-            collections,
+            "rgc: collection %zu: %zu live bytes in %zu objects"
+            " (typed %zu / conservative %zu), collected %zu objects / %zu bytes,"
+            " mark %zu us, sweep %zu us, next threshold %zu,"
+            " typed payload scans %zu, conservative payload scans %zu,"
+            " typed marks %zu, conservative marks %zu\n",
+            rgc_stats_collections,
             rgc_live_bytes,
             rgc_object_count,
-            rgc_next_collect
+            rgc_stats_typed_objects,
+            rgc_stats_conservative_objects,
+            rgc_stats_collected_objects,
+            rgc_stats_collected_bytes,
+            rgc_stats_last_mark_ns / 1000u,
+            rgc_stats_last_sweep_ns / 1000u,
+            rgc_next_collect,
+            rgc_stats_typed_payload_scans,
+            rgc_stats_conservative_payload_scans,
+            rgc_stats_typed_marks,
+            rgc_stats_conservative_marks
         );
     }
 }
 
-void *rgc_alloc(size_t size) {
+void *rgc_alloc(size_t size, const uint32_t *descriptor) {
+    const uint32_t *validated;
+    uint16_t size_class = RGC_LARGE_CLASS;
     void *block;
 
     if (size == 0u) {
@@ -469,19 +726,43 @@ void *rgc_alloc(size_t size) {
         rgc_collect();
     }
 
-    block = malloc(size);
-    if (!block) {
-        rgc_collect();
-        block = malloc(size);
+    validated = rgc_validate_descriptor(descriptor, size);
+    if (size <= RGC_SMALL_LIMIT) {
+        size_class = (uint16_t)((size + RGC_CLASS_STEP - 1u) / RGC_CLASS_STEP - 1u);
+        block = rgc_small_alloc(size_class);
         if (!block) {
-            rgc_panic();
+            rgc_collect();
+            block = rgc_small_alloc(size_class);
+        }
+    } else {
+        block = malloc(size);
+        if (block) {
+            rgc_heap_bytes += size;
+        }
+        if (!block) {
+            rgc_collect();
+            block = malloc(size);
+            if (block) {
+                rgc_heap_bytes += size;
+            }
         }
     }
+    if (!block) {
+        rgc_panic();
+    }
 
-    rgc_register((uintptr_t)block, size);
-    rgc_live_bytes += size;
+    rgc_zero_pointer_slots(block, validated, size);
+    rgc_register((uintptr_t)block, size, validated, size_class);
+    rgc_live_bytes += rgc_capacity_of(size, size_class);
 
     return block;
+}
+
+/* Untyped byte storage for standard-library code that is shared with the
+   non-collecting runtime: the payload has no published layout, so the
+   collector scans it conservatively. */
+void *riddle_alloc_bytes(size_t size) {
+    return rgc_alloc(size, NULL);
 }
 
 void rgc_free(void *ptr) {
@@ -498,9 +779,15 @@ void rgc_free(void *ptr) {
     }
 
     slot = (uint32_t)(object - rgc_headers);
-    rgc_live_bytes -= object->size;
+    rgc_live_bytes -= rgc_object_capacity(object);
     rgc_hash_remove(slot);
-    free((void *)object->start);
+    rgc_release_block(object);
+    if (object->desc) {
+        rgc_stats_typed_objects -= 1u;
+    } else {
+        rgc_stats_conservative_objects -= 1u;
+    }
+    object->desc = NULL;
     object->occupied = 0;
     object->next = rgc_free_slot;
     rgc_free_slot = slot + 1u;
@@ -509,6 +796,53 @@ void rgc_free(void *ptr) {
     // O(1)-average hash lookup on the exact payload address, so interior or
     // foreign pointers never free anything they should not.
 }
+
+void *rgc_realloc(void *ptr, size_t size) {
+    // rgc_alloc may trigger a collection; ptr stays reachable through this
+    // frame (conservative stack scan) and stays registered until rgc_free
+    // below. The old block's descriptor and size are read first so the new
+    // block keeps the same layout contract.
+    const uint32_t *descriptor = NULL;
+    size_t old_size = 0;
+    void *next;
+
+    if (ptr) {
+        RgcHeader *object = rgc_find_exact(ptr);
+        if (object) {
+            old_size = object->size;
+            descriptor = object->desc;
+        }
+    }
+
+    next = rgc_alloc(size, descriptor);
+
+    if (ptr) {
+        if (old_size != 0u) {
+            memcpy(next, ptr, old_size < size ? old_size : size);
+        }
+        rgc_free(ptr);
+    }
+
+    return next;
+}
+
+/* Cheap counters for tests and tooling; see the header comment for the
+   meaning of each number. All of them are safe to call between collections. */
+size_t rgc_stat_live_bytes(void) { return rgc_live_bytes; }
+size_t rgc_stat_live_objects(void) { return rgc_object_count; }
+size_t rgc_stat_total_objects(void) { return rgc_stats_total_objects; }
+size_t rgc_stat_collections(void) { return rgc_stats_collections; }
+size_t rgc_stat_typed_objects(void) { return rgc_stats_typed_objects; }
+size_t rgc_stat_conservative_objects(void) { return rgc_stats_conservative_objects; }
+size_t rgc_stat_marked_objects(void) { return rgc_stats_marked_objects; }
+size_t rgc_stat_typed_payload_scans(void) { return rgc_stats_typed_payload_scans; }
+size_t rgc_stat_conservative_payload_scans(void) { return rgc_stats_conservative_payload_scans; }
+size_t rgc_stat_last_mark_ns(void) { return rgc_stats_last_mark_ns; }
+size_t rgc_stat_last_sweep_ns(void) { return rgc_stats_last_sweep_ns; }
+size_t rgc_stat_heap_bytes(void) { return rgc_heap_bytes; }
+size_t rgc_stat_chunks(void) { return rgc_chunk_count; }
+
+int rgc_is_allocated(const void *ptr) { return rgc_find_exact(ptr) != NULL; }
 
 typedef struct {
     uint8_t level;
@@ -640,29 +974,6 @@ size_t riddle_proc_diagnostic_message_length(size_t index) {
     return index < riddle_proc_diagnostic_len ? riddle_proc_diagnostics[index].len : 0u;
 }
 
-void *rgc_realloc(void *ptr, size_t size) {
-    // rgc_alloc may trigger a collection; ptr stays reachable through this
-    // frame (conservative stack scan) and stays registered until rgc_free below.
-    size_t old_size = 0;
-    void *next;
-
-    if (ptr) {
-        RgcHeader *object = rgc_find_exact(ptr);
-        old_size = object ? object->size : 0u;
-    }
-
-    next = rgc_alloc(size);
-
-    if (ptr) {
-        if (old_size != 0u) {
-            memcpy(next, ptr, old_size < size ? old_size : size);
-        }
-        rgc_free(ptr);
-    }
-
-    return next;
-}
-
 /* ---- std::fs shim (avoids clashing with <stdio.h> prototypes) ---- */
 #include <stdio.h>
 #include <stdint.h>
@@ -683,13 +994,11 @@ int riddle_fs_fflush(size_t stream) {
 }
 
 /* ---- std::time / std::random / std::fs (metadata + directory) shims ---- */
-#include <time.h>
 int64_t riddle_time(void *value) {
     return (int64_t)time((time_t *)value);
 }
 
 #if defined(_WIN32)
-#include <windows.h>
 void riddle_sleep_ms(uint64_t milliseconds) {
     Sleep((DWORD)milliseconds);
 }
@@ -821,7 +1130,7 @@ size_t riddle_fs_read_dir(
         if (utf8_len <= 0) {
             continue;
         }
-        uint8_t *buffer = (uint8_t *)rgc_alloc((size_t)utf8_len);
+        uint8_t *buffer = (uint8_t *)rgc_alloc((size_t)utf8_len, NULL);
         if (WideCharToMultiByte(CP_UTF8, 0, name, -1, (char *)buffer, utf8_len, NULL, NULL) == 0) {
             continue;
         }
@@ -847,7 +1156,7 @@ size_t riddle_fs_read_dir(
             continue;
         }
         size_t len = strlen(name);
-        uint8_t *buffer = (uint8_t *)rgc_alloc(len + 1);
+        uint8_t *buffer = (uint8_t *)rgc_alloc(len + 1, NULL);
         memcpy(buffer, name, len + 1);
         names_out[count] = buffer;
         lens_out[count] = len;

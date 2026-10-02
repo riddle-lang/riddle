@@ -173,7 +173,7 @@ impl LowerCtx<'_> {
             let object = builder.load(place, self.convert_type(&ty));
             let data = builder.extract_value(object, 0, Type::Ptr(Box::new(Type::Unit)));
             let drop_index = match self.convert_type(&ty) {
-                Type::Struct(struct_ty) => struct_ty.fields.len().saturating_sub(1),
+                Type::Struct(struct_ty) => struct_ty.def().fields.len().saturating_sub(1),
                 _ => return,
             };
             let drop = builder.extract_value(

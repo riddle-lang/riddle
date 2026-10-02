@@ -22,6 +22,12 @@ void *riddle_alloc(size_t size) {
     return pointer;
 }
 
+/* Untyped byte storage for standard-library code shared with the default
+   runtime: there is no layout descriptor, so the payload is never scanned. */
+void *riddle_alloc_bytes(size_t size) {
+    return riddle_alloc(size);
+}
+
 void *riddle_realloc(void *pointer, size_t size) {
     void *next = realloc(pointer, size ? size : 1u);
     if (!next) {

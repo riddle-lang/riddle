@@ -1320,6 +1320,31 @@ impl LowerCtx<'_> {
                 {
                     return (*ty).clone();
                 }
+                // Resolve through the scope graph before falling back to a
+                // name scan: the scan below cannot tell a local item from a
+                // same-named one in another package (std declares `Chain`,
+                // `String`, `Formatter`, …), and for a self-reference such as
+                // `enum Chain { Link(&Chain) }` it would silently pick the
+                // other package's item.
+                match self.hir.type_resolutions.get(&path.range) {
+                    Some(ResolvedName::Struct(sid)) => {
+                        return self.convert_struct_type_from_hir_args_with_substs(
+                            *sid,
+                            &path.type_args,
+                            subst,
+                            const_subst,
+                        );
+                    }
+                    Some(ResolvedName::Enum(eid)) => {
+                        return self.convert_enum_type_from_hir_args_with_substs(
+                            *eid,
+                            &path.type_args,
+                            subst,
+                            const_subst,
+                        );
+                    }
+                    _ => {}
+                }
                 if let Some(name) = path.segments.last().map(|n| n.0.as_str()) {
                     for (sid, s) in self.hir.item_tree.structs.iter() {
                         if s.name.0 == name {

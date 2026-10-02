@@ -1817,3 +1817,69 @@ fn tree_map_iter_supports_manual_consecutive_next_calls() {
     let (code, stdout) = compile_and_run(source, true);
     assert_eq!(code, 0, "stdout: {stdout}");
 }
+
+/// A struct that reaches itself through a reference lowers to a shared
+/// definition whose own field points back at it. The C backend has to emit the
+/// forward `typedef`, keep the back edge a pointer, and still compute field
+/// offsets for the recursive occurrence.
+#[test]
+fn recursive_struct_runs_through_the_c_backend() {
+    let (code, stdout) = compile_and_run(
+        r#"
+        struct Node {
+            data: i32,
+            next: Option<&Node>,
+        }
+
+        fun sum(node: &Node) -> i32 {
+            match node.next {
+                Option::Some(next) => node.data + sum(next),
+                Option::None => node.data,
+            }
+        }
+
+        fun main() -> i32 {
+            let tail = Node { data: 2, next: Option::None };
+            let middle = Node { data: 3, next: Option::Some(&tail) };
+            let head = Node { data: 1, next: Option::Some(&middle) };
+            sum(&head) - 6
+        }
+        "#,
+        true,
+    );
+
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_eq!(stdout, "");
+}
+
+/// The same shape without the GC: owner-scope freeing still has to walk the
+/// recursive definition.
+#[test]
+fn recursive_struct_runs_without_gc() {
+    let (code, stdout) = compile_and_run(
+        r#"
+        struct Node {
+            data: i32,
+            next: Option<&Node>,
+        }
+
+        fun depth(node: &Node) -> i32 {
+            match node.next {
+                Option::Some(next) => 1 + depth(next),
+                Option::None => 0,
+            }
+        }
+
+        fun main() -> i32 {
+            let tail = Node { data: 2, next: Option::None };
+            let middle = Node { data: 3, next: Option::Some(&tail) };
+            let head = Node { data: 1, next: Option::Some(&middle) };
+            depth(&head) - 2
+        }
+        "#,
+        false,
+    );
+
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_eq!(stdout, "");
+}

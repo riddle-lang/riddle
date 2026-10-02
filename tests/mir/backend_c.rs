@@ -1397,11 +1397,13 @@ fn c_backend_heap_allocates_escaping_reference_temporaries() {
     let generated = CBackend::new().compile(&module).unwrap();
 
     assert!(
-        generated.contains("rgc_alloc(sizeof(int32_t*))"),
+        generated.contains("rgc_alloc(sizeof(int32_t*), riddle_desc_"),
         "nested reference temporary was not heap allocated:\n{generated}"
     );
     assert_eq!(
-        generated.matches("rgc_alloc(sizeof(int32_t))").count(),
+        generated
+            .matches("rgc_alloc(sizeof(int32_t), riddle_desc_")
+            .count(),
         2,
         "both referenced i32 values must escape:\n{generated}"
     );
@@ -1587,11 +1589,11 @@ fn c_source_names_use_prefixed_collision_free_encoding() {
     let mut typed = mir::Function::new("switch".into(), Type::Unit);
     typed.add_param(
         "auto".into(),
-        Type::Struct(StructType {
-            name: "union".into(),
-            symbol: "union".into(),
-            fields: vec![("case".into(), Type::Int(IntTy::I32))],
-        }),
+        Type::Struct(StructType::defined(
+            "union".into(),
+            "union".into(),
+            vec![("case".into(), Type::Int(IntTy::I32))],
+        )),
     );
     typed.set_terminator(typed.entry, Terminator::Return(None));
     module.add_function(typed);
@@ -2278,7 +2280,7 @@ fn c_backend_heap_allocates_an_escaping_array() {
 
     assert!(
         generated.contains(&format!(
-            "rgc_alloc(sizeof({}[2]))",
+            "rgc_alloc(sizeof({}[2]), riddle_desc_",
             c_struct_type(0, "Data")
         )),
         "{generated}"
@@ -2287,7 +2289,7 @@ fn c_backend_heap_allocates_an_escaping_array() {
     assert!(generated.contains("(&h"), "{generated}");
     assert!(
         generated.contains(&format!(
-            "rgc_alloc(sizeof({}[2][3]))",
+            "rgc_alloc(sizeof({}[2][3]), riddle_desc_",
             c_struct_type(0, "Data")
         )),
         "{generated}"
@@ -2675,4 +2677,95 @@ fn c_while_let_re_evaluates_the_scrutinee_inside_the_loop() {
         "{generated}"
     );
     assert!(generated.contains("goto block_loop_body_"), "{generated}");
+}
+
+#[test]
+fn c_backend_keeps_shared_references_writable_for_mut_fields() {
+    // `mut` fields are written through a shared reference, so a `&T` has to
+    // stay a plain `T*` in the generated C. Emitting `const T*` would let the C
+    // compiler assume the pointee never changes and make those writes undefined
+    // behaviour — `ctype_of` drops the reference's mutability bit for exactly
+    // this reason, and nothing may start qualifying shared references again.
+    let result = riddlec::pipeline::compile(
+        r#"
+        struct Counter {
+            mut hits: i32,
+            mut plain: i32,
+        }
+
+        fun bump(counter: &Counter) -> i32 {
+            counter.hits += 1;
+            counter.plain += counter.hits;
+            counter.plain
+        }
+
+        fun main() -> i32 {
+            let counter = Counter { hits: 0, plain: 1 };
+            bump(&counter)
+        }
+        "#,
+    );
+    assert!(result.success(), "{:#?}", result.type_result.diagnostics);
+    let generated = riddlec::pipeline::generate_c(result.mir_module.as_ref().unwrap()).unwrap();
+
+    // The struct type is emitted (so the assertion below is not vacuous), and
+    // nothing const-qualifies it.
+    assert!(generated.contains("riddle_t_"), "{generated}");
+    assert!(!generated.contains("const riddle_t_"), "{generated}");
+}
+
+#[test]
+fn c_backend_publishes_gc_layout_descriptors() {
+    // Every heap_alloc site passes the compiler-published pointer-slot map for
+    // its payload, so the collector marks declared slots and ignores the rest.
+    // Nested aggregates compose their offsets from offsetof expressions, and a
+    // describable type never falls back to the conservative word scan.
+    let module = lower(
+        r"
+        struct Slot { value: i32, next: *mut i32, flag: bool }
+        struct Inner { data: *mut u8 }
+        struct Outer { inner: Inner, count: i32 }
+
+        fun escaped_slot() -> &Slot {
+            let slot = Slot { value: 1, next: 0usize as *mut i32, flag: true };
+            &slot
+        }
+
+        fun escaped_outer() -> &Outer {
+            let outer = Outer { inner: Inner { data: 0usize as *mut u8 }, count: 2 };
+            &outer
+        }
+        ",
+    );
+    let generated = CBackend::new().compile(&module).unwrap();
+
+    assert!(
+        generated.contains("[] = { 1u, (uint32_t)(offsetof("),
+        "missing single-slot descriptor:\n{generated}"
+    );
+    let nested = generated
+        .lines()
+        .find(|line| line.contains("riddle_desc_1[]"))
+        .expect("missing nested descriptor");
+    assert_eq!(
+        nested.matches("offsetof(").count(),
+        2,
+        "nested offsets must compose out of both definitions: {nested}"
+    );
+    assert_eq!(
+        generated.matches(", riddle_desc_").count(),
+        2,
+        "both allocations must pass a descriptor:\n{generated}"
+    );
+    assert!(
+        !generated.contains(", NULL)"),
+        "describable types must not fall back to a conservative scan:\n{generated}"
+    );
+    for index in 0..2 {
+        let symbol = format!("riddle_desc_{index}");
+        assert!(
+            generated.matches(&symbol).count() >= 2,
+            "descriptor {symbol} must be declared and used:\n{generated}"
+        );
+    }
 }

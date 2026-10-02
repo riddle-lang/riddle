@@ -388,11 +388,7 @@ impl LowerCtx<'_> {
             .collect();
         (
             capture_types,
-            StructType {
-                name: format!("{name}_env"),
-                symbol: format!("{name}_env"),
-                fields,
-            },
+            StructType::defined(format!("{name}_env"), format!("{name}_env"), fields),
         )
     }
 
@@ -415,7 +411,7 @@ impl LowerCtx<'_> {
             builder.alloca(env_ty)
         };
         for (index, (capture, capture_ty)) in info.captures.iter().zip(capture_types).enumerate() {
-            let field_ty = env_struct.fields[index].1.clone();
+            let field_ty = env_struct.def().fields[index].1.clone();
             let value = match capture.mode {
                 CaptureMode::Shared | CaptureMode::Mutable => {
                     self.capture_place(builder, outer_params, &capture.place, capture_ty)
@@ -613,7 +609,7 @@ impl LowerCtx<'_> {
             .zip(input.capture_types)
             .enumerate()
         {
-            let field_ty = input.env_struct.fields[index].1.clone();
+            let field_ty = input.env_struct.def().fields[index].1.clone();
             let field = builder.field_ptr(env_ptr, index, field_ty.clone());
             let place = match capture.mode {
                 CaptureMode::Shared | CaptureMode::Mutable => builder.load(field, field_ty),
@@ -777,7 +773,7 @@ impl LowerCtx<'_> {
         for projection in projections {
             let ty = match (projection, &access.ty) {
                 (Projection::Field(index), Type::Struct(strukt)) => {
-                    strukt.fields.get(*index)?.1.clone()
+                    strukt.def().fields.get(*index)?.1.clone()
                 }
                 (Projection::Field(index), Type::Tuple(elements)) => elements.get(*index)?.clone(),
                 (Projection::Index(Some(_)), Type::Array(element, _)) => *element.clone(),

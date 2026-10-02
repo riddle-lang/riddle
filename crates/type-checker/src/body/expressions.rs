@@ -574,7 +574,22 @@ impl TypeChecker<'_> {
             }
             Expr::Cast { base, target } => {
                 let source_ty = self.check_expr(ctx, *base);
-                self.record_value_use(ctx, *base, ValueUse::Move);
+                // A cast reads its operand's value; it never consumes it.
+                // Every other supported cast works on scalars and raw
+                // pointers, which are `Copy` — so only a reference operand can
+                // make this distinction observable, and recording a move for
+                // one ended the reference's life: `let p = r as *const i32;`
+                // followed by `*r = 5` reported `E0100: use of moved value`.
+                let resolved_source = self.resolve_type(&source_ty);
+                self.record_value_use(
+                    ctx,
+                    *base,
+                    if matches!(resolved_source, Type::Ref(..)) {
+                        ValueUse::Copy
+                    } else {
+                        ValueUse::Move
+                    },
+                );
                 let target_ty =
                     self.lower_type_ref_with_params_at(target, &ctx.generic_params, span);
                 if is_unsafe_dst_layout_cast(&source_ty, &target_ty) {

@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 use escape_analysis::EscapeResult;
 use hir::{
@@ -20,7 +22,7 @@ use crate::builder::Builder;
 use crate::func::Function;
 use crate::instr::{BinOp, CastOp, CmpOp, Inst, InstKind, PanicSite, UnOp};
 use crate::module::Module;
-use crate::types::{EnumVariantKind, FloatTy, FnPtrType, IntTy, StructType, Type};
+use crate::types::{EnumVariantKind, FloatTy, FnPtrType, IntTy, StructDef, StructType, Type};
 use crate::value::{BlockId, FuncRef, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +102,8 @@ pub fn lower_hir<S: BuildHasher>(
         generic_lambda_functions: HashMap::new(),
         function_adapters: HashMap::new(),
         capture_access: HashMap::new(),
+        struct_types: RefCell::new(HashMap::new()),
+        struct_defs: RefCell::new(Vec::new()),
         current_lambda: None,
         current_lambda_env: None,
         lambda_counter: 0,
@@ -171,6 +175,7 @@ pub fn lower_hir<S: BuildHasher>(
         ctx.module.add_extern(name.clone(), params, ret_type);
     }
 
+    ctx.module.struct_defs = ctx.struct_defs.take();
     ctx.module
 }
 
@@ -216,6 +221,14 @@ struct LowerCtx<'a> {
     generic_lambda_functions: HashMap<(BodyId, ExprId, String), String>,
     function_adapters: HashMap<(hir::item_tree::FunctionId, Vec<type_checker::Type>), String>,
     capture_access: HashMap<CapturePlace, CaptureAccess>,
+    /// Converted nominal structs, keyed by symbol. A definition is registered as
+    /// a recursive handle before its own fields are converted, which is what
+    /// lets a self-referential struct terminate.
+    struct_types: RefCell<HashMap<String, StructType>>,
+    /// Strong handles for every definition created above. They move into the
+    /// module, which keeps the `Weak` occurrences inside recursive types
+    /// resolvable for as long as the module's types are used.
+    struct_defs: RefCell<Vec<Arc<StructDef>>>,
     current_lambda: Option<ExprId>,
     current_lambda_env: Option<Value>,
     lambda_counter: u32,
@@ -461,24 +474,25 @@ fn closure_value_type(signature: FnPtrType) -> Type {
         ret: signature.ret,
     });
     let name = format!("riddle_closure_{:016x}", hasher.finish());
-    Type::Struct(StructType {
-        symbol: name.clone(),
+    Type::Struct(StructType::defined(
+        name.clone(),
         name,
-        fields: vec![
+        vec![
             ("call".into(), call),
             ("env".into(), closure_env_type()),
             ("drop".into(), closure_drop_function_type()),
         ],
-    })
+    ))
 }
 
 fn closure_call_signature(ty: &Type) -> Option<FnPtrType> {
     let Type::Struct(strukt) = ty else {
         return None;
     };
-    match strukt.fields.first().map(|(_, ty)| ty) {
+    let fields = strukt.def();
+    match fields.fields.first().map(|(_, ty)| ty) {
         Some(Type::FnPtr(signature))
-            if strukt.fields.get(1).map(|field| &field.1) == Some(&closure_env_type()) =>
+            if fields.fields.get(1).map(|field| &field.1) == Some(&closure_env_type()) =>
         {
             Some(signature.clone())
         }
@@ -539,7 +553,7 @@ fn mono_type_name(ty: &Type) -> String {
         // Length-prefix user type names so differently-named type
         // arguments cannot collide when suffixes join on `_`:
         // `<A_B, C>` and `<A, B_C>` encode as `4:A_B_1:C` vs `1:A_3:B_C`.
-        Type::Struct(st) => encode_mono_name(&st.name),
+        Type::Struct(st) => encode_mono_name(st.name()),
         Type::Enum(e) => encode_mono_name(&e.name),
         Type::FnPtr(_) => "fn".into(),
         Type::Void => "void".into(),
@@ -548,7 +562,7 @@ fn mono_type_name(ty: &Type) -> String {
 
 fn mono_type_symbol(ty: &Type) -> String {
     match ty {
-        Type::Struct(st) => st.symbol.clone(),
+        Type::Struct(st) => st.symbol().to_string(),
         Type::Enum(enumeration) => format!("enum-layout::{enumeration:?}"),
         Type::FnPtr(signature) => format!(
             "fn({})->{}",

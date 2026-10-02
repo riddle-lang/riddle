@@ -738,7 +738,7 @@ impl LowerCtx<'_> {
         }
         let methods = self.dyn_trait_methods(trait_id, &trait_subst);
         let mut values = vec![data];
-        for (field_name, field_ty) in struct_ty.fields.iter().skip(1) {
+        for (field_name, field_ty) in struct_ty.def().fields.iter().skip(1) {
             let Some((method_trait_id, method_name, method_subst)) = methods
                 .iter()
                 .find(|(method_trait_id, method, _)| {
@@ -840,12 +840,14 @@ impl LowerCtx<'_> {
         let source_methods = self.dyn_trait_methods(source_trait_id, &source_subst);
         let target_methods = self.dyn_trait_methods(target_trait_id, &target_subst);
         let mut values = vec![builder.extract_value(source, 0, Type::Ptr(Box::new(Type::Unit)))];
-        for (field_name, field_ty) in target_struct.fields.iter().skip(1) {
+        let target_def = target_struct.def();
+        let source_def = source_struct.def();
+        for (field_name, field_ty) in target_def.fields.iter().skip(1) {
             if field_name == "drop" {
                 if !source_owned {
                     return None;
                 }
-                let index = source_struct.fields.len().checked_sub(1)?;
+                let index = source_def.fields.len().checked_sub(1)?;
                 values.push(builder.extract_value(source, index, field_ty.clone()));
                 continue;
             }
@@ -862,7 +864,7 @@ impl LowerCtx<'_> {
                 .map(|(trait_id, method, _)| (*trait_id, method.name.0.clone()))?;
             let source_field_name =
                 self.dyn_trait_method_field_name(&source_methods, method_trait_id, &method_name);
-            let source_index = source_struct
+            let source_index = source_def
                 .fields
                 .iter()
                 .position(|(name, _)| name == &source_field_name)?;

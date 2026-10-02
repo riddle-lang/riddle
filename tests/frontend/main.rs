@@ -154,6 +154,89 @@ fn terminated_block_comments_stay_error_free() {
 }
 
 #[test]
+fn block_comment_closes_at_a_terminator_ending_the_input() {
+    // The `//` sits mid-line, so it is prose: the terminator that ends the
+    // input closes the comment instead of the remainder being reported as
+    // unterminated.
+    let source = "fun main() { }\n/* note: // see `&mut` here */";
+    let comments: Vec<&str> = frontend::lexer::lex(source)
+        .iter()
+        .filter(|token| token.kind == SyntaxKind::BlockComment)
+        .map(|token| token.text(source))
+        .collect();
+    assert_eq!(
+        comments,
+        vec!["/* note: // see `&mut` here */"],
+        "{comments:?}"
+    );
+
+    let mut parser = IncrementalParser::new();
+    let parse = parser.set_source(source);
+    assert!(parse.errors.is_empty(), "{:?}", parse.errors);
+}
+
+#[test]
+fn block_comment_resumes_after_the_line_comment_on_its_own_line() {
+    // A terminator later on the same line as `//` is comment text; the block
+    // closes at the terminator on the following line.
+    let source = "/* first\n // let a: &mut Guard = ... */\n */ fun main() { }";
+    let comments: Vec<&str> = frontend::lexer::lex(source)
+        .iter()
+        .filter(|token| token.kind == SyntaxKind::BlockComment)
+        .map(|token| token.text(source))
+        .collect();
+    assert_eq!(
+        comments,
+        vec!["/* first\n // let a: &mut Guard = ... */\n */"],
+        "{comments:?}"
+    );
+
+    let parse = parse(source);
+    assert!(tree_has(&parse, SyntaxKind::FuncDecl));
+    assert!(!tree_has(&parse, SyntaxKind::ErrorNode));
+}
+
+#[test]
+fn block_comment_keeps_nested_comments_across_a_line_comment() {
+    let source = "/* outer // note\n /* inner */ still outer\n */ fun main() { }";
+    let comments: Vec<&str> = frontend::lexer::lex(source)
+        .iter()
+        .filter(|token| token.kind == SyntaxKind::BlockComment)
+        .map(|token| token.text(source))
+        .collect();
+    assert_eq!(
+        comments,
+        vec!["/* outer // note\n /* inner */ still outer\n */"],
+        "{comments:?}"
+    );
+
+    let parse = parse(source);
+    assert!(tree_has(&parse, SyntaxKind::FuncDecl));
+    assert!(!tree_has(&parse, SyntaxKind::ErrorNode));
+}
+
+#[test]
+fn block_comment_still_closes_before_a_line_comment_on_the_same_line() {
+    let source = "/* first */ // trailing note\nfun main() { }";
+    let comments: Vec<&str> = frontend::lexer::lex(source)
+        .iter()
+        .filter(|token| token.kind == SyntaxKind::BlockComment)
+        .map(|token| token.text(source))
+        .collect();
+    assert_eq!(comments, vec!["/* first */"], "{comments:?}");
+
+    let parse = parse(source);
+    assert!(tree_has(&parse, SyntaxKind::FuncDecl));
+    assert!(!tree_has(&parse, SyntaxKind::ErrorNode));
+}
+
+#[test]
+fn nested_block_comments_stay_error_free() {
+    let parse = parse("/* outer /* inner */ still outer */ fun main() { }");
+    assert!(tree_has(&parse, SyntaxKind::FuncDecl));
+}
+
+#[test]
 fn match_block_arm_without_trailing_comma_parses() {
     // The arm's own closing `}` terminates a block-bodied arm, so the comma
     // is optional and must not derail into expression-error cascades.
@@ -458,4 +541,70 @@ fn deeply_nested_blocks_report_one_nesting_diagnostic_inner() {
         "{:?}",
         parse.errors
     );
+}
+
+#[test]
+fn a_block_statement_does_not_swallow_a_following_parenthesized_statement() {
+    // A block-shaped expression in statement position is a complete statement,
+    // so the `(` opening the next statement must not be read as a call on it.
+    // The postfix branch ran before the `bare_block` guard, so `if true { }`
+    // followed by `(*p) = 5;` parsed as `if true { }(*p)`, i.e. a call on the
+    // `()`-typed `if` — which the type checker then rejected with `E0004`
+    // ("cannot call value of type ()"). There is no call anywhere in this
+    // snippet, so any `CallExpr` in the tree is that misparse.
+    let parse = parse(
+        "fun main() {
+            let p = &mut x as *mut i32;
+            unsafe {
+                if true { }
+                (*p) = 5;
+            }
+        }",
+    );
+    assert!(tree_has(&parse, SyntaxKind::IfStmt));
+    assert!(tree_has(&parse, SyntaxKind::BinaryExpr));
+    assert_eq!(
+        parse
+            .syntax()
+            .descendants()
+            .filter(|node| node.kind() == SyntaxKind::CallExpr)
+            .count(),
+        0,
+        "tree: {}",
+        parse.syntax()
+    );
+}
+
+#[test]
+fn a_block_statement_still_ends_a_statement_without_parens() {
+    // The guard must not stop the parser from reading a following statement at
+    // all: `*p = 5;` after the same `if` already worked and must keep working.
+    let parse = parse(
+        "fun main() {
+            let p = &mut x as *mut i32;
+            unsafe {
+                if true { }
+                *p = 5;
+            }
+        }",
+    );
+    assert!(tree_has(&parse, SyntaxKind::IfStmt));
+    assert!(tree_has(&parse, SyntaxKind::BinaryExpr));
+}
+
+#[test]
+fn a_mut_field_marks_only_the_field_not_its_type() {
+    use ast::support::AstNode as _;
+
+    // `plain: &mut i32` mentions `mut` inside the type, which modifies the
+    // reference rather than the field. Only a direct `Mut` token before the
+    // name makes the field itself interior-mutable.
+    let parse = parse("struct Counter { mut hits: i32, plain: &mut i32 }");
+    let fields = parse
+        .syntax()
+        .descendants()
+        .filter_map(ast::StructField::cast)
+        .map(|field| field.is_mut())
+        .collect::<Vec<_>>();
+    assert_eq!(fields, vec![true, false], "{}", parse.syntax());
 }

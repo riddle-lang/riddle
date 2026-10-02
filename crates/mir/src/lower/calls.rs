@@ -185,9 +185,9 @@ impl LowerCtx<'_> {
                     trait_call.trait_id,
                     &trait_call.method,
                 );
+                let def = struct_ty.def();
                 let (slot, method_ty) =
-                    struct_ty
-                        .fields
+                    def.fields
                         .iter()
                         .enumerate()
                         .find_map(|(index, (name, ty))| {

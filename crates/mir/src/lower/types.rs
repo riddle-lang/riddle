@@ -1,7 +1,7 @@
 use super::{
-    FloatTy, FnPtrType, HashMap, HashSet, IntTy, LowerCtx, ResolvedName, StructType, Type,
-    closure_value_type, is_dyn_object_safe_method, is_self_associated_path, mono_name_from_parts,
-    mono_type_name, mono_type_symbol, tc_const_arg_to_usize,
+    FloatTy, FnPtrType, HashMap, HashSet, IntTy, LowerCtx, ResolvedName, StructDef, StructType,
+    Type, closure_value_type, is_dyn_object_safe_method, is_self_associated_path,
+    mono_name_from_parts, mono_type_name, mono_type_symbol, tc_const_arg_to_usize,
 };
 
 impl LowerCtx<'_> {
@@ -196,11 +196,11 @@ impl LowerCtx<'_> {
             .collect::<Vec<_>>();
         let name = mono_name_from_parts(&trait_data.name.0, &symbol_args);
         let prefix = if owned { "owned_dyn" } else { "dyn" };
-        Type::Struct(StructType {
-            name: format!("{prefix}_{name}"),
-            symbol: format!("{prefix}_trait::{id}::{name}"),
+        Type::Struct(StructType::defined(
+            format!("{prefix}_{name}"),
+            format!("{prefix}_trait::{id}::{name}"),
             fields,
-        })
+        ))
     }
 
     pub(super) fn dyn_trait_hir_args_with_substs(
@@ -744,6 +744,15 @@ impl LowerCtx<'_> {
         const_args: &[usize],
     ) -> Type {
         let s = &self.hir.item_tree.structs[sid];
+        let name = mono_name_from_parts(&s.name.0, &type_name_args(type_args, const_args));
+        let symbol = format!(
+            "struct::{}::{}",
+            sid.into_raw().into_u32(),
+            mono_name_from_parts(&s.name.0, &type_symbol_args(type_args, const_args))
+        );
+        if let Some(cached) = self.struct_types.borrow().get(&symbol).cloned() {
+            return Type::Struct(cached);
+        }
         let subst = s
             .generics
             .iter()
@@ -756,33 +765,35 @@ impl LowerCtx<'_> {
             .zip(const_args.iter())
             .map(|(name, value)| (name.0.as_str(), *value))
             .collect::<HashMap<_, _>>();
-        let fields = s
-            .fields
-            .iter()
-            .map(|f| {
-                (
-                    f.name.0.clone(),
-                    self.convert_hir_type_with_substs(&f.ty, &subst, &const_subst),
-                )
-            })
-            .collect();
-        let name_args = type_args
-            .iter()
-            .map(mono_type_name)
-            .chain(const_args.iter().map(std::string::ToString::to_string))
-            .collect::<Vec<_>>();
-        let name = mono_name_from_parts(&s.name.0, &name_args);
-        let symbol_args = type_args
-            .iter()
-            .map(mono_type_symbol)
-            .chain(const_args.iter().map(std::string::ToString::to_string))
-            .collect::<Vec<_>>();
-        let symbol = mono_name_from_parts(&s.name.0, &symbol_args);
-        Type::Struct(StructType {
-            symbol: format!("struct::{}::{symbol}", sid.into_raw().into_u32()),
-            name,
-            fields,
-        })
+        // The handle is registered before the fields are converted, so a field
+        // that reaches this struct again resolves to the definition being built
+        // instead of converting it a second time.
+        let handle = StructType::new_cyclic(|def| {
+            self.struct_types.borrow_mut().insert(
+                symbol.clone(),
+                StructType::recursive(def, name.clone(), symbol.clone()),
+            );
+            let fields = s
+                .fields
+                .iter()
+                .map(|f| {
+                    (
+                        f.name.0.clone(),
+                        self.convert_hir_type_with_substs(&f.ty, &subst, &const_subst),
+                    )
+                })
+                .collect();
+            StructDef {
+                name: name.clone(),
+                symbol: symbol.clone(),
+                fields,
+            }
+        });
+        self.struct_defs.borrow_mut().push(handle.def());
+        self.struct_types
+            .borrow_mut()
+            .insert(symbol, handle.clone());
+        Type::Struct(handle)
     }
 
     pub(super) fn convert_enum_type(
@@ -832,6 +843,17 @@ impl LowerCtx<'_> {
         const_args: &[usize],
     ) -> Type {
         let e = &self.hir.item_tree.enums[eid];
+        // Enums lower to a tagged struct, so they share the nominal cache and
+        // the recursive-definition handling with structs.
+        let name = mono_name_from_parts(&e.name.0, &type_name_args(type_args, const_args));
+        let symbol = format!(
+            "enum::{}::{}",
+            eid.into_raw().into_u32(),
+            mono_name_from_parts(&e.name.0, &type_symbol_args(type_args, const_args))
+        );
+        if let Some(cached) = self.struct_types.borrow().get(&symbol).cloned() {
+            return Type::Struct(cached);
+        }
         let subst = e
             .generics
             .iter()
@@ -844,46 +866,61 @@ impl LowerCtx<'_> {
             .zip(const_args.iter())
             .map(|(name, value)| (name.0.as_str(), *value))
             .collect::<HashMap<_, _>>();
-        let mut fields = vec![("tag".to_string(), Type::Int(IntTy::U32))];
-        for variant in &e.variants {
-            match &variant.kind {
-                hir::item_tree::HirVariantKind::Tuple(items) => {
-                    for (index, item) in items.iter().enumerate() {
-                        fields.push((
-                            format!("{}_{}", variant.name.0, index),
-                            self.convert_hir_type_with_substs(item, &subst, &const_subst),
-                        ));
+        let handle = StructType::new_cyclic(|def| {
+            self.struct_types.borrow_mut().insert(
+                symbol.clone(),
+                StructType::recursive(def, name.clone(), symbol.clone()),
+            );
+            let mut fields = vec![("tag".to_string(), Type::Int(IntTy::U32))];
+            for variant in &e.variants {
+                match &variant.kind {
+                    hir::item_tree::HirVariantKind::Tuple(items) => {
+                        for (index, item) in items.iter().enumerate() {
+                            fields.push((
+                                format!("{}_{}", variant.name.0, index),
+                                self.convert_hir_type_with_substs(item, &subst, &const_subst),
+                            ));
+                        }
                     }
-                }
-                hir::item_tree::HirVariantKind::Struct(items) => {
-                    for item in items {
-                        fields.push((
-                            format!("{}_{}", variant.name.0, item.name.0),
-                            self.convert_hir_type_with_substs(&item.ty, &subst, &const_subst),
-                        ));
+                    hir::item_tree::HirVariantKind::Struct(items) => {
+                        for item in items {
+                            fields.push((
+                                format!("{}_{}", variant.name.0, item.name.0),
+                                self.convert_hir_type_with_substs(&item.ty, &subst, &const_subst),
+                            ));
+                        }
                     }
+                    hir::item_tree::HirVariantKind::Unit => {}
                 }
-                hir::item_tree::HirVariantKind::Unit => {}
             }
-        }
-        let name_args = type_args
-            .iter()
-            .map(mono_type_name)
-            .chain(const_args.iter().map(std::string::ToString::to_string))
-            .collect::<Vec<_>>();
-        let name = mono_name_from_parts(&e.name.0, &name_args);
-        let symbol_args = type_args
-            .iter()
-            .map(mono_type_symbol)
-            .chain(const_args.iter().map(std::string::ToString::to_string))
-            .collect::<Vec<_>>();
-        let symbol = mono_name_from_parts(&e.name.0, &symbol_args);
-        Type::Struct(StructType {
-            symbol: format!("enum::{}::{symbol}", eid.into_raw().into_u32()),
-            name,
-            fields,
-        })
+            StructDef {
+                name: name.clone(),
+                symbol: symbol.clone(),
+                fields,
+            }
+        });
+        self.struct_defs.borrow_mut().push(handle.def());
+        self.struct_types
+            .borrow_mut()
+            .insert(symbol, handle.clone());
+        Type::Struct(handle)
     }
+}
+
+fn type_name_args(type_args: &[Type], const_args: &[usize]) -> Vec<String> {
+    type_args
+        .iter()
+        .map(mono_type_name)
+        .chain(const_args.iter().map(std::string::ToString::to_string))
+        .collect()
+}
+
+fn type_symbol_args(type_args: &[Type], const_args: &[usize]) -> Vec<String> {
+    type_args
+        .iter()
+        .map(mono_type_symbol)
+        .chain(const_args.iter().map(std::string::ToString::to_string))
+        .collect()
 }
 
 pub(super) fn dyn_trait_drop_function_type() -> Type {

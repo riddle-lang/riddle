@@ -164,7 +164,8 @@ pub fn render_value(val: &Val, ty: &mir::types::Type, mem: &mem::Memory) -> Stri
             render_tuple(fields, elements, mem)
         }
         (mir::types::Type::Struct(strukt), Val::Struct(fields)) => {
-            let rendered = strukt
+            let def = strukt.def();
+            let rendered = def
                 .fields
                 .iter()
                 .zip(fields)
@@ -173,7 +174,7 @@ pub fn render_value(val: &Val, ty: &mir::types::Type, mem: &mem::Memory) -> Stri
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{} {{ {rendered} }}", strukt.name)
+            format!("{} {{ {rendered} }}", def.name)
         }
         (mir::types::Type::Enum(enum_ty), Val::Struct(fields)) => {
             let Some(Val::Int(tag)) = fields.first() else {

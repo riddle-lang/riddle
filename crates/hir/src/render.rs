@@ -152,7 +152,12 @@ pub fn format_struct_limited(strukt: &HirStruct, limit: usize) -> String {
 #[must_use]
 pub fn format_struct_field(field: &HirStructField) -> String {
     let visibility = visibility_prefix(&field.visibility);
-    format!("{visibility}{}: {}", field.name.0, field.ty.display())
+    let mutable = if field.is_mut { "mut " } else { "" };
+    format!(
+        "{visibility}{mutable}{}: {}",
+        field.name.0,
+        field.ty.display()
+    )
 }
 
 #[must_use]

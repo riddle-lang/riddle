@@ -495,3 +495,42 @@ fn accepts_recursive_struct_behind_indirection() {
 
     assert_eq!(result.diagnostics, vec![]);
 }
+
+#[test]
+fn accepts_a_mut_field_on_a_struct() {
+    let result = check(
+        r"
+        struct Counter {
+            mut hits: i32,
+            pub mut name: i32,
+        }
+
+        fun main() -> i32 {
+            let counter = Counter { hits: 0, name: 1 };
+            counter.hits
+        }
+        ",
+    );
+
+    assert_eq!(result.diagnostics, vec![]);
+}
+
+#[test]
+fn rejects_a_mut_field_on_an_enum_variant() {
+    // Variant fields are only reachable through a pattern, and a pattern
+    // binding is a local of its own, so the modifier could never take effect.
+    let result = check(
+        r"
+        enum Shape {
+            Circle { mut radius: i32 },
+            Square { side: i32 },
+        }
+        ",
+    );
+
+    assert!(
+        result.diagnostics.iter().any(|d| d.code == "E0014"),
+        "{:?}",
+        result.diagnostics
+    );
+}

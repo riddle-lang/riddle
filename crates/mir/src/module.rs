@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use la_arena::Arena;
 
 use crate::func::Function;
-use crate::types::Type;
+use crate::types::{StructDef, Type};
 
 /// Top-level compilation unit containing all functions and external declarations.
 #[derive(Debug, Clone)]
@@ -15,6 +17,13 @@ pub struct Module {
 
     /// Externally-linked function signatures.
     pub externs: Vec<ExternFunc>,
+
+    /// Every nominal struct definition the module's types mention.
+    ///
+    /// A recursive struct refers to its own definition through a `Weak`, so the
+    /// module owns the strong handle for as long as any of its types can be
+    /// resolved. Definitions are shared: one entry per monomorphized struct.
+    pub struct_defs: Vec<Arc<StructDef>>,
 
     /// Errors discovered while lowering type-checked HIR.
     pub diagnostics: Vec<type_checker::Diagnostic>,
@@ -34,6 +43,7 @@ impl Module {
             functions: Arena::new(),
             function_order: Vec::new(),
             externs: Vec::new(),
+            struct_defs: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

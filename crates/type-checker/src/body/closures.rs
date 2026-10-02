@@ -421,7 +421,24 @@ impl TypeChecker<'_> {
                 }
             }
             Expr::Unsafe { body } => self.record_value_use(ctx, body, requested_use),
-            Expr::Cast { base, .. } => self.record_value_use(ctx, base, ValueUse::Move),
+            Expr::Cast { base, .. } => {
+                // A cast reads the pointer out of a reference operand instead
+                // of consuming it, so `let p = r as *const i32;` must leave a
+                // `&mut r` usable afterwards. Every other supported operand
+                // type is `Copy`, which the downgrade above already covers.
+                let base_use = if requested_use == ValueUse::Move
+                    && self
+                        .result
+                        .expr_types
+                        .get(&(ctx.body_id, base))
+                        .is_some_and(|ty| matches!(self.resolve_type(ty), Type::Ref(..)))
+                {
+                    ValueUse::Copy
+                } else {
+                    requested_use
+                };
+                self.record_value_use(ctx, base, base_use);
+            }
             _ => self.record_capture_use(ctx, expr_id, use_kind),
         }
     }

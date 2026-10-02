@@ -1210,6 +1210,9 @@ impl<'s> Parser<'s> {
         self.attrs();
         let m = self.start();
         self.optional_pub();
+        if self.at(SyntaxKind::Mut) {
+            self.bump();
+        }
         self.expect(SyntaxKind::Ident);
         self.expect(SyntaxKind::Colon);
         self.ty();
@@ -1579,6 +1582,15 @@ impl<'s> Parser<'s> {
             && is_expr_with_block(lhs.kind(self));
 
         loop {
+            // A block-shaped expression in statement position is a complete
+            // statement, so the next token starts a new one: no postfix or
+            // infix operator may attach to it. Checking this before the
+            // postfix branch matters for `(`, which would otherwise parse the
+            // following parenthesized statement as a call on the block —
+            // `if c { .. }` followed by `(*p) = v;` became `if c { .. }(*p)`.
+            if bare_block {
+                break;
+            }
             let op = self.current();
             let pos_before_iteration = self.current_non_trivia_pos;
 
@@ -1670,9 +1682,6 @@ impl<'s> Parser<'s> {
 
             // infix
             // binary
-            if bare_block {
-                break;
-            }
             // range
             if matches!(op, SyntaxKind::DotDot | SyntaxKind::DotDotEq) {
                 const RANGE_BP: u8 = 1;

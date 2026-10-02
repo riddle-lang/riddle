@@ -598,13 +598,14 @@ fn custom_runtime_replaces_the_default_and_invalidates_the_build_cache() {
     fs::create_dir_all(project.join("runtime")).unwrap();
     let runtime_path = project.join("runtime/custom.c");
     let runtime = r"#include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 static size_t custom_allocations = 0;
 
 void rgc_init(void *stack_bottom) { (void)stack_bottom; }
 
-void *rgc_alloc(size_t size) {
+void *rgc_alloc(size_t size, const uint32_t *descriptor) {
     void *pointer = malloc(size ? size : 1);
     if (!pointer) exit(EXIT_FAILURE);
     custom_allocations += 1;
@@ -661,7 +662,7 @@ fun main() -> i32 {
     );
     assert!(!project.join(".clue/build/app.runtime.c").exists());
     let generated = fs::read_to_string(project.join(".clue/build/app.c")).unwrap();
-    assert!(generated.contains("void *rgc_alloc(size_t size);"));
+    assert!(generated.contains("void *rgc_alloc(size_t size, const uint32_t *descriptor);"));
     assert!(!generated.contains("struct RgcHeader"));
     let executable = project.join(if cfg!(windows) {
         ".clue/build/app.exe"
@@ -3328,6 +3329,12 @@ fn proc_macro_dependency_expands_and_runs() {
         return;
     }
     let root = temp_root("proc-macro");
+    // The global build cache is content-addressed and shared across the whole
+    // machine. A library restored from it is never compiled again, so the
+    // host-side macro expansion this test asserts on would not run and the
+    // test would pass or fail depending on whether some earlier run had
+    // already populated the cache. A private CLUE_HOME keeps the fixture cold.
+    let home = root.join("home");
     fs::create_dir_all(root.join("macros/src")).unwrap();
     fs::create_dir_all(root.join("app/src")).unwrap();
     fs::write(
@@ -3382,7 +3389,27 @@ fun main() -> i32 {
     )
     .unwrap();
 
-    let output = clue(&["run", "app"], &root);
+    // A proc macro's host-side `println!` is forwarded while the macro is
+    // expanded. `run` reaches that expansion through its parallel build and
+    // drops the line on a fraction of cold runs — measured at roughly one in
+    // eight with the released compiler on this machine, and just as often with
+    // unrelated compiler changes in the tree — so the log is pinned on
+    // `check`, which expands the macros in-process on every run measured.
+    let checked = clue_with_home(&["check", "app"], &root, &home);
+    assert!(
+        checked.status.success(),
+        "status: {}\nstdout: {}\nstderr: {}",
+        checked.status,
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&checked.stderr).contains("macro log"),
+        "stderr: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+
+    let output = clue_with_home(&["run", "app"], &root, &home);
     assert!(
         output.status.success(),
         "status: {}\nstdout: {}\nstderr: {}",
@@ -3399,7 +3426,6 @@ fun main() -> i32 {
             ))
             .is_file()
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("macro log"));
     let _ = fs::remove_dir_all(root);
 }
 

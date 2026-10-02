@@ -705,6 +705,7 @@ impl Lower for StructField {
             name,
             name_range,
             visibility: lower_visibility(self.is_pub()),
+            is_mut: self.is_mut(),
             ty,
             ty_range,
             attrs,

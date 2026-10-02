@@ -372,6 +372,12 @@ static int process_request(RiddleProcExpand expand) {
             || !write_u32((uint32_t)diagnostic->message_len)
             || !write_bytes(diagnostic->message, diagnostic->message_len)) return -1;
     }
+    // A macro's own `println!` is forwarded to this process's stderr
+    // (`riddle_proc_putchar`). Flush it before the response leaves, so the log
+    // is on the wire before the caller can tear the worker down: shutdown kills
+    // the runner, and whatever the C runtime still buffered would be lost —
+    // which is exactly the intermittent missing "macro log" line.
+    fflush(stderr);
     return fflush(stdout) == 0 ? 1 : -1;
 }
 
@@ -836,11 +842,27 @@ impl ProcMacroWorker {
 
 impl Drop for ProcMacroWorker {
     fn drop(&mut self) {
+        // Closing the request channel ends the I/O thread, which drops the
+        // child's stdin: the runner then returns from its read loop and exits
+        // normally, flushing whatever the C runtime still holds (a macro's
+        // forwarded `println!` goes to its stderr). Give it a short window to
+        // do that instead of killing it outright — a kill can cut a log line
+        // off mid-flight, which is what made the proc-macro tests flaky.
         self.requests.take();
-        let _ = self.child.kill();
         if let Some(io_thread) = self.io_thread.take() {
             let _ = io_thread.join();
         }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }

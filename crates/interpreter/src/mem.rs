@@ -45,7 +45,12 @@ pub fn size_of(ty: &Type) -> usize {
         Type::FnPtr(_) => 8,
         Type::Tuple(elements) => elements.iter().map(size_of).sum(),
         Type::Array(inner, count) => size_of(inner) * count,
-        Type::Struct(strukt) => strukt.fields.iter().map(|(_, field)| size_of(field)).sum(),
+        Type::Struct(strukt) => strukt
+            .def()
+            .fields
+            .iter()
+            .map(|(_, field)| size_of(field))
+            .sum(),
         Type::Enum(enum_ty) => {
             let payload = enum_ty
                 .variants
@@ -74,7 +79,14 @@ pub fn field_offset(pointee: &Type, index: usize) -> Option<usize> {
 #[must_use]
 pub fn field_types(pointee: &Type) -> Option<Vec<Type>> {
     match pointee {
-        Type::Struct(strukt) => Some(strukt.fields.iter().map(|(_, ty)| ty.clone()).collect()),
+        Type::Struct(strukt) => Some(
+            strukt
+                .def()
+                .fields
+                .iter()
+                .map(|(_, ty)| ty.clone())
+                .collect(),
+        ),
         Type::Tuple(elements) => Some(elements.clone()),
         Type::Enum(enum_ty) => {
             let mut fields = vec![Type::Int(mir::types::IntTy::U32)];

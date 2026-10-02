@@ -3188,7 +3188,7 @@ fn assert_reference_allocation_counts(module: &mir::Module) {
         .flat_map(|(_, block)| &block.insts)
         .filter_map(|inst| match &inst.kind {
             mir::instr::InstKind::HeapAlloc(mir::types::Type::Ptr(ty)) => match ty.as_ref() {
-                mir::types::Type::Struct(ty) => Some(ty.name.as_str()),
+                mir::types::Type::Struct(ty) => Some(ty.name()),
                 _ => None,
             },
             _ => None,
@@ -3258,7 +3258,7 @@ fn assert_reference_closure_allocations(module: &mir::Module) {
             .any(|inst| matches!(
                 &inst.kind,
                 mir::instr::InstKind::HeapAlloc(mir::types::Type::Ptr(ty))
-                    if matches!(ty.as_ref(), mir::types::Type::Struct(ty) if ty.name == "Data")
+                    if matches!(ty.as_ref(), mir::types::Type::Struct(ty) if ty.name() == "Data")
             )),
         "a value-captured aggregate must keep its referenced local alive"
     );
@@ -3272,7 +3272,7 @@ fn assert_reference_closure_allocations(module: &mir::Module) {
                 && matches!(
                     &function.ret_type,
                     mir::types::Type::Ref(ty, _)
-                        if matches!(ty.as_ref(), mir::types::Type::Struct(ty) if ty.name == "Data")
+                        if matches!(ty.as_ref(), mir::types::Type::Struct(ty) if ty.name() == "Data")
                 )
         })
         .unwrap();
@@ -3365,7 +3365,7 @@ fn overloaded_operator_uses_parameter_escape_summary() {
         .flat_map(|(_, block)| &block.insts)
         .filter_map(|inst| match &inst.kind {
             mir::instr::InstKind::HeapAlloc(mir::types::Type::Ptr(ty)) => match ty.as_ref() {
-                mir::types::Type::Struct(ty) => Some(ty.name.as_str()),
+                mir::types::Type::Struct(ty) => Some(ty.name()),
                 _ => None,
             },
             _ => None,
@@ -3725,7 +3725,7 @@ fn lambda_returned_from_lambda_uses_heap_environment() {
                 block.insts.iter().any(|inst| matches!(
                     &inst.kind,
                     mir::instr::InstKind::HeapAlloc(mir::types::Type::Ptr(ty))
-                        if matches!(ty.as_ref(), mir::types::Type::Struct(ty) if ty.name.ends_with("_env"))
+                        if matches!(ty.as_ref(), mir::types::Type::Struct(ty) if ty.name().ends_with("_env"))
                 ))
             })),
         "an inner lambda returned across the outer lambda frame must escape"
@@ -4608,5 +4608,49 @@ fn lambda_returning_argument_reference_promotes_it() {
             .flat_map(|block| &block.insts)
             .any(|inst| matches!(inst.kind, mir::instr::InstKind::HeapAlloc(_))),
         "a callback that returns a reference to its argument must promote it: {func:#?}"
+    );
+}
+
+#[test]
+fn recursive_struct_keeps_a_finite_type_graph() {
+    // `next: *const Node` reaches the struct that is being defined. Lowering has
+    // to share one definition and refer back to it, because expanding the field
+    // types eagerly would never end.
+    let module = lower(
+        r"
+        struct Node {
+            data: i32,
+            next: *const Node,
+        }
+
+        fun touch(node: &Node) -> i32 {
+            node.data
+        }
+        ",
+    );
+
+    let node = module
+        .struct_defs
+        .iter()
+        .find(|def| def.name == "Node")
+        .expect("the recursive definition is registered on the module");
+    assert_eq!(node.fields.len(), 2);
+    let mir::types::Type::Ptr(inner) = &node.fields[1].1 else {
+        panic!(
+            "`next` should lower to a pointer, got {:?}",
+            node.fields[1].1
+        );
+    };
+    let mir::types::Type::Struct(handle) = inner.as_ref() else {
+        panic!("`next` should point at the struct itself");
+    };
+    assert!(
+        handle.is_recursive_occurrence(),
+        "the field reaching the struct again must be the shared back edge"
+    );
+    assert_eq!(
+        handle.def().symbol,
+        node.symbol,
+        "resolving the back edge must land on the same definition, not a copy"
     );
 }

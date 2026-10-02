@@ -2678,3 +2678,44 @@ fn overlapping_fnmut_captures_are_still_rejected() {
         result.diagnostics
     );
 }
+
+#[test]
+fn loop_carried_reference_through_recursive_type_converges() {
+    // `current = next`, where `next` was read out of `current.link` and
+    // `Link::Next(&Node)` makes the type recursive: the loop-head fixpoint used
+    // to compose one more place projection per round, so every round produced a
+    // deeper borrow (and a fresh loan) and the head never stopped changing. The
+    // analysis now truncates projection chains, which keeps the state finite.
+    // Pinned here because the run does not terminate at all without that cap.
+    let result = analyze(
+        r"
+        enum Link {
+            End,
+            Next(&Node),
+        }
+
+        struct Node {
+            data: i32,
+            link: Link,
+        }
+
+        fun walk(node: &Node) -> i32 {
+            let mut current = node;
+            let mut guard = 0;
+            while guard < 4 {
+                match current.link {
+                    Link::End => {
+                        break;
+                    }
+                    Link::Next(next) => {
+                        current = next;
+                    }
+                }
+                guard = guard + 1;
+            }
+            current.data
+        }
+        ",
+    );
+    assert_eq!(result.diagnostics, vec![]);
+}

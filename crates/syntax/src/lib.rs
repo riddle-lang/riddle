@@ -26,11 +26,41 @@ fn block_comment(lex: &mut logos::Lexer<'_, SyntaxKind>) -> Option<()> {
                     return Some(());
                 }
             }
+            // A `//` that starts its own line comments out the rest of that
+            // line, so a terminator inside it is text: commented-out code such
+            // as `// let a = b; */` stays inside the block. A `//` in the
+            // middle of a line is prose, and a terminator after it still closes
+            // the comment. Either way scanning resumes on the next line.
+            b"//" if comment_body_line_starts_at(bytes, index) => {
+                match bytes[index + 2..].iter().position(|byte| *byte == b'\n') {
+                    Some(offset) => index += 2 + offset + 1,
+                    // The line comment runs to the end of the input, so no
+                    // terminator is left and the block stays unterminated.
+                    None => break,
+                }
+            }
             _ => index += 1,
         }
     }
+    // Unterminated: the whole remainder becomes the comment token, so the
+    // parser reports one error instead of re-lexing the body as code.
     lex.bump(bytes.len());
     Some(())
+}
+
+/// Whether the `//` at `index` is the first non-whitespace text on its line
+/// inside a comment body. The body starts right after the opener, so reaching
+/// position 0 without crossing a newline means the opener shares that line.
+fn comment_body_line_starts_at(bytes: &[u8], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 {
+        match bytes[cursor - 1] {
+            b'\n' => return true,
+            byte if byte.is_ascii_whitespace() => cursor -= 1,
+            _ => return false,
+        }
+    }
+    false
 }
 
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

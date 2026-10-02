@@ -260,6 +260,21 @@ impl<'a> TypeChecker<'a> {
                     }
                     HirVariantKind::Struct(fields) => {
                         for field in fields {
+                            // A variant's fields are only reachable through a
+                            // pattern, and a pattern binding is a local of its
+                            // own — no write can travel through a shared
+                            // reference to the enum — so `mut` here would parse
+                            // and then do nothing.
+                            if field.is_mut {
+                                self.diagnostic(
+                                    "E0014",
+                                    format!(
+                                        "`mut` is not supported on enum variant fields: `{}` is only reachable through a pattern",
+                                        field.name.0
+                                    ),
+                                    Some(field.name_range),
+                                );
+                            }
                             let ty = self.lower_type_ref_with_params_at(
                                 &field.ty,
                                 &params,

@@ -1766,6 +1766,19 @@ impl StructField {
         support::token_of(&self.syntax, SyntaxKind::Pub).is_some()
     }
 
+    /// `mut name: T` — the field stays writable through a shared reference to
+    /// the containing value.
+    ///
+    /// Only direct tokens count: a `Mut` inside the type node (`n: &mut i32`)
+    /// modifies the reference, not the field.
+    #[must_use]
+    pub fn is_mut(&self) -> bool {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|token| token.kind() == SyntaxKind::Mut)
+    }
+
     #[must_use]
     pub fn name(&self) -> Option<SyntaxToken> {
         support::token_of(&self.syntax, SyntaxKind::Ident)

@@ -149,7 +149,7 @@ impl fmt::Display for TypeFmt<'_> {
             }
             Type::Slice(inner) => write!(f, "[{}]", TypeFmt(inner)),
             Type::Array(inner, len) => write!(f, "[{}; {}]", TypeFmt(inner), len),
-            Type::Struct(s) => write!(f, "{}", s.name),
+            Type::Struct(s) => write!(f, "{}", s.name()),
             Type::Enum(e) => write!(f, "{}", e.name),
             Type::FnPtr(fp) => {
                 let params: Vec<String> = fp

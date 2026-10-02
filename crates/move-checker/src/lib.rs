@@ -67,6 +67,17 @@ struct AccessPlace {
     projections: Vec<AccessProjection>,
 }
 
+/// Longest projection chain an [`AccessPlace`] keeps.
+///
+/// A loop that reassigns a value derived from its own place — `current = next`
+/// where `next` was read out of `current.link`, with `Link::Next(&Node)` making
+/// the type recursive — composes one more projection per fixpoint round. The
+/// loop head then never stops changing, because each round's borrow sits on a
+/// strictly deeper place and so gets a fresh loan. Truncating keeps a prefix of
+/// the real place, and a prefix covers at least as much storage as the place it
+/// came from: an overlap can only be reported more often, never missed.
+const MAX_PLACE_PROJECTIONS: usize = 8;
+
 impl AccessPlace {
     const fn new(root: AccessRoot) -> Self {
         Self {
@@ -76,12 +87,16 @@ impl AccessPlace {
     }
 
     fn field(mut self, index: usize) -> Self {
-        self.projections.push(AccessProjection::Field(index));
+        if self.projections.len() < MAX_PLACE_PROJECTIONS {
+            self.projections.push(AccessProjection::Field(index));
+        }
         self
     }
 
     fn index(mut self, index: Option<usize>) -> Self {
-        self.projections.push(AccessProjection::Index(index));
+        if self.projections.len() < MAX_PLACE_PROJECTIONS {
+            self.projections.push(AccessProjection::Index(index));
+        }
         self
     }
 }
@@ -215,7 +230,9 @@ pub fn analyze(hir: &HirFile, type_result: &TypeCheckResult) -> AnalysisResult {
         loop_break_values: Vec::new(),
         loop_break_states: Vec::new(),
         diagnostic_suppression: 0,
+        interior_writes: HashMap::new(),
     };
+    a.compute_interior_writes();
     a.analyze_all_bodies();
     a.result
 }
@@ -242,9 +259,352 @@ struct Analyzer<'a> {
     /// 收敛后每个循环用收敛态完整重放一遍（此计数归零）再发诊断，
     /// 保证依赖回边状态的借用/移动错误也恰好上报一次。
     diagnostic_suppression: usize,
+    /// Which `mut` fields each callable may write, per parameter. A call site
+    /// reads it to learn which of the receiver's or an argument's `mut` fields
+    /// the callee can move, so a live borrow into one of them is rejected.
+    interior_writes: HashMap<FunctionId, ParamWrites>,
+}
+
+/// The `mut` field paths one callable may write, relative to its parameters.
+///
+/// A path is a chain of field indices from the parameter root, truncated at the
+/// first `mut` field on it — writing below that field is covered by it. `None`
+/// records "unknown", which a caller reads as every `mut` field of that
+/// parameter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ParamWrites {
+    params: HashMap<usize, Option<HashSet<Vec<usize>>>>,
+}
+
+impl ParamWrites {
+    fn record(&mut self, param: usize, path: Vec<usize>) -> bool {
+        match self.params.entry(param) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                None => false,
+                Some(paths) => paths.insert(path),
+            },
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some(std::iter::once(path).collect()));
+                true
+            }
+        }
+    }
+
+    fn record_unknown(&mut self, param: usize) -> bool {
+        self.params.insert(param, None) != Some(None)
+    }
+}
+
+/// How the place an expression reaches relates to the enclosing function's
+/// parameters.
+enum PlaceShape {
+    /// Rooted at parameter `param` through `steps` field accesses. `indexed`
+    /// records that an index projection appeared before the first field step,
+    /// which makes a field-index chain from the root meaningless.
+    Known {
+        param: usize,
+        steps: Vec<(ExprId, usize)>,
+        indexed: bool,
+    },
+    /// Rooted at parameter `param`, but the path cannot be expressed.
+    Opaque { param: usize },
+    /// Not rooted at a parameter.
+    Other,
+}
+
+/// What a callable is known to write on one of its parameters.
+enum WrittenFields<'a> {
+    /// No concrete callee, or the callee's own answer is unknown.
+    Unknown,
+    /// Nothing: the callee's body was analysed and writes no `mut` field here.
+    Nothing,
+    Paths(&'a HashSet<Vec<usize>>),
 }
 
 impl Analyzer<'_> {
+    /// Computes, for every callable with a body, which `mut` fields of its
+    /// parameters it may write — including writes performed by the callables it
+    /// passes those places to.
+    ///
+    /// A call site uses this to decide whether invoking a callable can move
+    /// storage a live borrow points into. Without it the only sound answer is
+    /// "every `mut` field of every type it might touch", which rejects calls
+    /// that write a different field, or nothing at all.
+    fn compute_interior_writes(&mut self) {
+        let order = self
+            .hir
+            .item_tree
+            .functions
+            .iter()
+            .filter_map(|(fid, _)| self.hir.function_bodies.get(&fid).map(|body| (fid, *body)))
+            .collect::<Vec<_>>();
+        let mut summaries: HashMap<FunctionId, ParamWrites> = HashMap::new();
+        // The lattice only grows, so this converges; the cap is a guard against
+        // an unexpectedly long chain, and falling back to "unknown" keeps the
+        // result sound if it is ever hit.
+        for _ in 0..32 {
+            let mut changed = false;
+            let mut next = HashMap::with_capacity(order.len());
+            for (fid, body_id) in &order {
+                let writes = self.body_interior_writes(*fid, *body_id, &summaries);
+                if summaries.get(fid) != Some(&writes) {
+                    changed = true;
+                }
+                next.insert(*fid, writes);
+            }
+            summaries = next;
+            if !changed {
+                self.interior_writes = summaries;
+                return;
+            }
+        }
+        for (fid, writes) in &mut summaries {
+            let _ = fid;
+            *writes = ParamWrites::default();
+            writes.params.insert(0, None);
+        }
+        self.interior_writes = summaries;
+    }
+
+    /// The `mut` fields one body may write, relative to that function's
+    /// parameters.
+    fn body_interior_writes(
+        &self,
+        function_id: FunctionId,
+        body_id: BodyId,
+        summaries: &HashMap<FunctionId, ParamWrites>,
+    ) -> ParamWrites {
+        let body = &self.hir.bodies[body_id];
+        let bounds = self
+            .type_result
+            .body_bounds
+            .get(&body_id)
+            .map_or(&[][..], Vec::as_slice);
+        let ctx = BodyCtx::new(function_id, body_id, body, bounds);
+        let mut writes = ParamWrites::default();
+        for (_, expr) in body.exprs.iter() {
+            match expr {
+                Expr::Binary { lhs, op, .. } if op.is_assignment() => {
+                    self.record_place_write(&ctx, *lhs, &mut writes);
+                }
+                Expr::Unary {
+                    operand,
+                    op: UnaryOp::MutRef,
+                } => self.record_place_write(&ctx, *operand, &mut writes),
+                Expr::Call { callee, args, .. } => {
+                    self.record_call_writes(&ctx, *callee, args, summaries, &mut writes);
+                }
+                _ => {}
+            }
+        }
+        writes
+    }
+
+    /// Records the `mut` field `place_expr` writes, if it is parameter-rooted.
+    fn record_place_write(&self, ctx: &BodyCtx<'_>, place_expr: ExprId, writes: &mut ParamWrites) {
+        match self.parameter_place(ctx, place_expr) {
+            PlaceShape::Known {
+                param,
+                steps,
+                indexed: false,
+            } => {
+                if let Some(path) = self.mut_field_prefix(ctx, &steps) {
+                    writes.record(param, path);
+                }
+            }
+            // An index projection before the first field step, or an
+            // unresolvable field, makes the written field path inexpressible.
+            // The place itself is still known to be inside `param`.
+            PlaceShape::Known { param, .. } | PlaceShape::Opaque { param } => {
+                writes.record_unknown(param);
+            }
+            PlaceShape::Other => {}
+        }
+    }
+
+    /// Propagates what the callee writes onto the places this body hands it.
+    fn record_call_writes(
+        &self,
+        ctx: &BodyCtx<'_>,
+        callee: ExprId,
+        args: &[ExprId],
+        summaries: &HashMap<FunctionId, ParamWrites>,
+        writes: &mut ParamWrites,
+    ) {
+        let (inputs, modes, fid, _trait_call) = self.call_signature(ctx, callee, args);
+        // A `&mut` argument hands the callee full write access to that place,
+        // whatever the callee's own body does with it — `holder.items.push(..)`
+        // writes `items` because `push` takes `&mut self`, not because `items`
+        // is a `mut` field of the callee's own type.
+        for (index, input) in inputs.iter().enumerate() {
+            if modes.get(index).copied().flatten() == Some(BorrowKind::Mutable) {
+                self.record_place_write(ctx, peel_reference(ctx, *input), writes);
+            }
+        }
+        let Some(summary) = fid.and_then(|fid| summaries.get(&fid)) else {
+            // No body to summarise (an extern) or no concrete callee (dynamic
+            // dispatch, a function pointer, a generic bound): assume every
+            // `mut` field of the places handed over.
+            for (index, input) in inputs.iter().enumerate() {
+                if modes.get(index).copied().flatten() != Some(BorrowKind::Mutable) {
+                    self.record_opaque_argument(ctx, *input, writes);
+                }
+            }
+            return;
+        };
+        for (index, input) in inputs.iter().enumerate() {
+            if modes.get(index).copied().flatten() == Some(BorrowKind::Mutable) {
+                continue;
+            }
+            match summary.params.get(&index) {
+                None => {}
+                Some(None) => self.record_opaque_argument(ctx, *input, writes),
+                Some(Some(paths)) => {
+                    for path in paths {
+                        self.record_mapped_write(ctx, *input, path, writes);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Marks the caller's parameter holding `input` as an unknown write, but
+    /// only when that place can carry `mut` fields at all — a call through a
+    /// type parameter cannot write fields of `T`.
+    fn record_opaque_argument(&self, ctx: &BodyCtx<'_>, input: ExprId, writes: &mut ParamWrites) {
+        let place_expr = peel_reference(ctx, input);
+        if self
+            .mut_field_indices(ctx, place_expr)
+            .is_none_or(|fields| fields.is_empty())
+        {
+            return;
+        }
+        match self.parameter_place(ctx, place_expr) {
+            PlaceShape::Known { param, .. } | PlaceShape::Opaque { param } => {
+                writes.record_unknown(param);
+            }
+            PlaceShape::Other => {}
+        }
+    }
+
+    /// Maps a path the callee writes on this argument back onto the caller.
+    fn record_mapped_write(
+        &self,
+        ctx: &BodyCtx<'_>,
+        input: ExprId,
+        callee_path: &[usize],
+        writes: &mut ParamWrites,
+    ) {
+        let place_expr = peel_reference(ctx, input);
+        match self.parameter_place(ctx, place_expr) {
+            PlaceShape::Known {
+                param,
+                steps,
+                indexed: false,
+            } => {
+                if let Some(prefix) = self.mut_field_prefix(ctx, &steps) {
+                    // The caller's own path already lands on a `mut` field, so
+                    // that field covers whatever the callee does below it.
+                    writes.record(param, prefix);
+                } else {
+                    let mut path = steps.iter().map(|(_, index)| *index).collect::<Vec<_>>();
+                    path.extend_from_slice(callee_path);
+                    writes.record(param, path);
+                }
+            }
+            PlaceShape::Known { param, .. } | PlaceShape::Opaque { param } => {
+                writes.record_unknown(param);
+            }
+            PlaceShape::Other => {}
+        }
+    }
+
+    /// Walks an expression down to the parameter it is rooted at, collecting
+    /// the field accesses on the way.
+    fn parameter_place(&self, ctx: &BodyCtx<'_>, expr: ExprId) -> PlaceShape {
+        match &ctx.body.exprs[expr] {
+            Expr::Path {
+                resolved: Some(ResolvedName::Param(index)),
+                ..
+            } => PlaceShape::Known {
+                param: *index,
+                steps: Vec::new(),
+                indexed: false,
+            },
+            Expr::FieldAccess { base, field } => {
+                let index = self.resolve_field_index(ctx.body_id, *base, field);
+                match self.parameter_place(ctx, *base) {
+                    PlaceShape::Known {
+                        param,
+                        mut steps,
+                        indexed,
+                    } => match index {
+                        Some(index) => {
+                            steps.push((expr, index));
+                            PlaceShape::Known {
+                                param,
+                                steps,
+                                indexed,
+                            }
+                        }
+                        None => PlaceShape::Opaque { param },
+                    },
+                    PlaceShape::Opaque { param } => PlaceShape::Opaque { param },
+                    PlaceShape::Other => PlaceShape::Other,
+                }
+            }
+            Expr::IndexAccess { base, .. } => match self.parameter_place(ctx, *base) {
+                PlaceShape::Known {
+                    param,
+                    steps,
+                    indexed: _,
+                } => PlaceShape::Known {
+                    param,
+                    steps,
+                    indexed: true,
+                },
+                PlaceShape::Opaque { param } => PlaceShape::Opaque { param },
+                PlaceShape::Other => PlaceShape::Other,
+            },
+            _ => PlaceShape::Other,
+        }
+    }
+
+    /// The shortest prefix of `steps` that ends on a `mut` field, as a chain of
+    /// field indices.
+    fn mut_field_prefix(&self, ctx: &BodyCtx<'_>, steps: &[(ExprId, usize)]) -> Option<Vec<usize>> {
+        let mut path = Vec::new();
+        for (expr, index) in steps {
+            path.push(*index);
+            if self.field_is_mut(ctx, *expr) == Some(true) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Field indices of the `mut` fields of `expr`'s type, or `None` when that
+    /// type is not a struct.
+    fn mut_field_indices(&self, ctx: &BodyCtx<'_>, expr: ExprId) -> Option<Vec<usize>> {
+        let ty = self.type_result.expr_types.get(&(ctx.body_id, expr))?;
+        let ty = match ty {
+            Type::Ref(inner, _) => inner.as_ref(),
+            ty => ty,
+        };
+        let Type::Struct(struct_id, _) = ty else {
+            return None;
+        };
+        Some(
+            self.hir.item_tree.structs[*struct_id]
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| field.is_mut)
+                .map(|(index, _)| index)
+                .collect(),
+        )
+    }
+
     fn analyze_all_bodies(&mut self) {
         for (fid, _) in self.hir.item_tree.functions.iter() {
             if let Some(body_id) = self.hir.function_bodies.get(&fid).copied() {
@@ -497,6 +857,18 @@ impl Analyzer<'_> {
         };
         self.move_check_expr(ctx, rhs);
         if op.is_assignment() {
+            // A shared reference does not permit mutating what it points to.
+            // The write target is reached through the borrow whenever the
+            // left-hand side implicitly dereferences a `&T` base (`r.field`,
+            // `r[0]`) or spells the dereference out (`*r`).
+            if self.writes_through_shared_reference(ctx, lhs) {
+                let name = Self::expr_name(ctx, lhs);
+                self.diag(
+                    format!("cannot assign to `{name}` through a shared reference"),
+                    span,
+                    "E0309",
+                );
+            }
             if let Some(lhs_place) = lhs_place.as_ref()
                 && Self::has_conflicting_place_move_borrow(ctx, lhs_place)
             {
@@ -582,8 +954,8 @@ impl Analyzer<'_> {
         };
         self.move_check_expr(ctx, operand);
         let origins = match op {
-            UnaryOp::Ref => self.create_borrow(ctx, operand, BorrowKind::Shared, span),
-            UnaryOp::MutRef => self.create_borrow(ctx, operand, BorrowKind::Mutable, span),
+            UnaryOp::Ref => self.create_borrow(ctx, expr_id, operand, BorrowKind::Shared, span),
+            UnaryOp::MutRef => self.create_borrow(ctx, expr_id, operand, BorrowKind::Mutable, span),
             UnaryOp::Deref => ctx.expr_origins.get(&operand).cloned().unwrap_or_default(),
             _ => Origins::new(),
         };
@@ -628,6 +1000,7 @@ impl Analyzer<'_> {
         let entry_origins = ctx.local_origins.clone();
         self.move_check_expr(ctx, then_branch);
         self.apply_recorded_value_use(ctx, then_branch);
+        let then_diverges = self.always_diverges(ctx, then_branch);
         if let Some(else_branch) = else_branch {
             let then_exit = ctx.move_state_snapshot();
             let then_origins = ctx.local_origins.clone();
@@ -635,17 +1008,82 @@ impl Analyzer<'_> {
             ctx.local_origins = entry_origins.clone();
             self.move_check_expr(ctx, else_branch);
             self.apply_recorded_value_use(ctx, else_branch);
-            ctx.merge_move_state_snapshot(&then_exit);
-            // A delayed binding assigned in both branches may hold either
-            // branch's borrow afterwards: union the branch origins so the
-            // conservative loan set survives the merge.
-            BodyCtx::merge_local_origins(ctx, &entry_origins, &then_origins);
+            if self.always_diverges(ctx, else_branch) {
+                // The `else` path never reaches the join, so the `then` exit
+                // stands on its own.
+                ctx.copy_move_state_snapshot(&then_exit);
+                ctx.local_origins = then_origins;
+            } else if !then_diverges {
+                ctx.merge_move_state_snapshot(&then_exit);
+                // A delayed binding assigned in both branches may hold either
+                // branch's borrow afterwards: union the branch origins so the
+                // conservative loan set survives the merge.
+                BodyCtx::merge_local_origins(ctx, &entry_origins, &then_origins);
+            }
+            // `then` diverges while `else` does not: the `else` exit is already
+            // the only state that reaches the join.
+        } else if then_diverges {
+            // Without an `else`, the code after the `if` is reached only when
+            // the condition is false. A `then` branch that always returns (or
+            // breaks, or panics) must not contribute its moves to that path —
+            // otherwise `if c { return f(1); } f(2)` reports the second call as
+            // a use of a moved value.
+            ctx.copy_move_state_snapshot(&branch_entry);
+            ctx.local_origins = entry_origins;
         }
         let mut value = ctx.expr_origin_value(then_branch);
         if let Some(else_branch) = else_branch {
             value.merge(ctx.expr_origin_value(else_branch));
         }
         ctx.set_expr_origin_value(expr_id, value);
+    }
+
+    /// Whether control never falls out of `expr_id`: every path through it
+    /// ends in a `return`, `break`, `continue`, or a `!`-typed call.
+    ///
+    /// A move performed on a diverging path never reaches the join after an
+    /// `if` or `match`, so it must not be merged into the state that follows.
+    fn always_diverges(&self, ctx: &BodyCtx<'_>, expr_id: ExprId) -> bool {
+        if matches!(
+            self.type_result.expr_types.get(&(ctx.body_id, expr_id)),
+            Some(Type::Never)
+        ) {
+            return true;
+        }
+        match &ctx.body.exprs[expr_id] {
+            // Statements after a diverging one are unreachable, so a single
+            // diverging statement is enough for the whole block.
+            Expr::Block { stmts, tail } => {
+                stmts
+                    .iter()
+                    .any(|stmt| self.stmt_always_diverges(ctx, *stmt))
+                    || tail.is_some_and(|tail| self.always_diverges(ctx, tail))
+            }
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.always_diverges(ctx, *then_branch)
+                    && else_branch.is_some_and(|branch| self.always_diverges(ctx, branch))
+            }
+            Expr::Match { arms, .. } => {
+                !arms.is_empty() && arms.iter().all(|arm| self.always_diverges(ctx, arm.body))
+            }
+            Expr::Unsafe { body } => self.always_diverges(ctx, *body),
+            _ => false,
+        }
+    }
+
+    fn stmt_always_diverges(&self, ctx: &BodyCtx<'_>, stmt: StmtId) -> bool {
+        match &ctx.body.stmts[stmt] {
+            Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue => true,
+            Stmt::Expr { expr } => self.always_diverges(ctx, *expr),
+            // A `let` continues past its own statement once the pattern
+            // matches, and `let ... else` diverges only on the else block.
+            // Items lowered into the body likewise fall through.
+            Stmt::Let { .. } | Stmt::Item { .. } => false,
+        }
     }
 
     fn move_check_while(&mut self, ctx: &mut BodyCtx<'_>, expr_id: ExprId) {
@@ -907,9 +1345,16 @@ impl Analyzer<'_> {
             self.move_check_expr(ctx, arm.body);
             self.apply_recorded_value_use(ctx, arm.body);
             ctx.pop_scope();
-            merged_bindings.merge_moved_from(&ctx.bindings);
-            merged_moved_places.extend(ctx.moved_places.iter().cloned());
-            merged_moved_sites.extend(ctx.moved_sites.clone());
+            // An arm that always diverges never reaches the code after the
+            // `match`, so its moves must not join here — otherwise a `return`
+            // arm that spends a value reports the next arm's use of it. A
+            // guarded arm is safe to skip for the same reason: when the guard
+            // fails the body never ran.
+            if !self.always_diverges(ctx, arm.body) {
+                merged_bindings.merge_moved_from(&ctx.bindings);
+                merged_moved_places.extend(ctx.moved_places.iter().cloned());
+                merged_moved_sites.extend(ctx.moved_sites.clone());
+            }
         }
         ctx.bindings = merged_bindings;
         ctx.moved_places = merged_moved_places;
@@ -1822,6 +2267,89 @@ impl Analyzer<'_> {
         }
     }
 
+    /// Whether writing to `expr_id` — or taking a `&mut` of it — would reach
+    /// the place through a shared reference.
+    ///
+    /// Field and index accesses implicitly dereference a reference base, so
+    /// `r.field = v` with `r: &T` writes through the borrow exactly like an
+    /// explicit `*r = v` does. Raw pointer bases are excluded: reaching
+    /// through them is governed by the `unsafe` rules instead. A path that
+    /// lands on — or passes through — a `mut` field is writable anyway, which
+    /// is what that declaration is for.
+    fn writes_through_shared_reference(&self, ctx: &BodyCtx<'_>, expr_id: ExprId) -> bool {
+        self.reached_through_shared_reference(ctx, expr_id)
+            && !self.path_has_mut_field(ctx, expr_id)
+    }
+
+    /// Whether the place `expr_id` names is reached by dereferencing a `&T` at
+    /// some step, ignoring `mut` fields. This is the shape that the call-scoped
+    /// `&mut` rule applies to.
+    fn reached_through_shared_reference(&self, ctx: &BodyCtx<'_>, expr_id: ExprId) -> bool {
+        let expr_type = |id: ExprId| self.type_result.expr_types.get(&(ctx.body_id, id));
+        match &ctx.body.exprs[expr_id] {
+            Expr::Unary {
+                operand,
+                op: UnaryOp::Deref | UnaryOp::MutRef,
+            } => match expr_type(*operand) {
+                Some(Type::Ref(_, false)) => true,
+                Some(Type::Ref(_, true) | Type::Ptr { .. }) => false,
+                _ => self.reached_through_shared_reference(ctx, *operand),
+            },
+            Expr::FieldAccess { base, .. } | Expr::IndexAccess { base, .. } => {
+                match expr_type(*base) {
+                    Some(Type::Ref(_, false)) => true,
+                    Some(Type::Ref(_, true) | Type::Ptr { .. }) => false,
+                    _ => self.reached_through_shared_reference(ctx, *base),
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the field `expr_id` projects out of its base is declared `mut`.
+    fn field_is_mut(&self, ctx: &BodyCtx<'_>, expr_id: ExprId) -> Option<bool> {
+        let Expr::FieldAccess { base, field } = &ctx.body.exprs[expr_id] else {
+            return None;
+        };
+        let index = self.resolve_field_index(ctx.body_id, *base, field)?;
+        let base_ty = self.type_result.expr_types.get(&(ctx.body_id, *base))?;
+        let base_ty = match base_ty {
+            Type::Ref(inner, _) => inner.as_ref(),
+            ty => ty,
+        };
+        let Type::Struct(struct_id, _) = base_ty else {
+            return None;
+        };
+        self.hir.item_tree.structs[*struct_id]
+            .fields
+            .get(index)
+            .map(|field| field.is_mut)
+    }
+
+    /// Whether any field on the path from the root to `expr_id` is declared
+    /// `mut`. A `mut` field hands out mutable access to everything below it,
+    /// and a `mut` field below a plain one is writable on its own account, so
+    /// either position makes the whole path writable.
+    fn path_has_mut_field(&self, ctx: &BodyCtx<'_>, expr_id: ExprId) -> bool {
+        let mut current = expr_id;
+        loop {
+            match &ctx.body.exprs[current] {
+                Expr::FieldAccess { base, .. } => {
+                    if self.field_is_mut(ctx, current) == Some(true) {
+                        return true;
+                    }
+                    current = *base;
+                }
+                Expr::IndexAccess { base, .. } => current = *base,
+                Expr::Unary {
+                    operand,
+                    op: UnaryOp::Deref,
+                } => current = *operand,
+                _ => return false,
+            }
+        }
+    }
+
     fn resolve_field_index(
         &self,
         body_id: BodyId,
@@ -1921,6 +2449,61 @@ impl Analyzer<'_> {
                 && access_places_overlap(&loan.place, place)
                 && !origins.is_some_and(|origins| origins.iter().any(|origin| origin.loan == *id))
         })
+    }
+
+    /// Places a call may write through the shared references it is handed.
+    ///
+    /// Every `&T` argument is considered, not just a method's receiver: a free
+    /// function or another type's method can write `T`'s `mut` fields through a
+    /// `&T` parameter just as a `&self` method can. The callee's interior-write
+    /// summary says which fields those are; when there is no concrete callee to
+    /// summarise, every `mut` field of the argument's type is assumed.
+    fn interior_write_places(
+        &self,
+        ctx: &BodyCtx<'_>,
+        inputs: &[ExprId],
+        modes: &[Option<BorrowKind>],
+        fid: Option<FunctionId>,
+    ) -> Vec<AccessPlace> {
+        let summary = fid.and_then(|fid| self.interior_writes.get(&fid));
+        let mut places = Vec::new();
+        for (index, input) in inputs.iter().enumerate() {
+            if modes.get(index).copied().flatten() != Some(BorrowKind::Shared) {
+                continue;
+            }
+            let place_expr = peel_reference(ctx, *input);
+            let Some(mut_fields) = self.mut_field_indices(ctx, place_expr) else {
+                continue;
+            };
+            if mut_fields.is_empty() {
+                continue;
+            }
+            let written = match summary.map(|summary| summary.params.get(&index)) {
+                Some(Some(None)) | None => WrittenFields::Unknown,
+                Some(Some(Some(paths))) => WrittenFields::Paths(paths),
+                Some(None) => WrittenFields::Nothing,
+            };
+            for target in self.access_targets(ctx, place_expr) {
+                match &written {
+                    WrittenFields::Nothing => {}
+                    WrittenFields::Unknown => {
+                        for field in &mut_fields {
+                            places.push(target.place.clone().field(*field));
+                        }
+                    }
+                    WrittenFields::Paths(paths) => {
+                        for path in *paths {
+                            let mut place = target.place.clone();
+                            for step in path {
+                                place = place.field(*step);
+                            }
+                            places.push(place);
+                        }
+                    }
+                }
+            }
+        }
+        places
     }
 
     fn access_targets(&self, ctx: &BodyCtx<'_>, expr_id: ExprId) -> Vec<AccessTarget> {
@@ -2117,6 +2700,31 @@ impl Analyzer<'_> {
                 continue;
             };
 
+            // Taking `&mut` of a place that is itself reached through a shared
+            // reference (`self.field.push(..)` inside a `&self` method) mutates
+            // through the shared borrow. An explicit `&mut r.field` argument is
+            // checked where the borrow is created, so it is skipped here to
+            // keep the diagnostic single.
+            if kind == BorrowKind::Mutable
+                && !matches!(
+                    ctx.body.exprs[*input],
+                    Expr::Unary {
+                        op: UnaryOp::MutRef,
+                        ..
+                    }
+                )
+                && self.writes_through_shared_reference(ctx, *input)
+            {
+                let name = Self::expr_name(ctx, *input);
+                self.diag(
+                    format!("cannot borrow `{name}` as mutable through a shared reference"),
+                    span,
+                    "E0309",
+                );
+                prepared.push(OriginValue::default());
+                continue;
+            }
+
             let targets = if self.expr_is_reference(ctx, *input) {
                 Self::origin_targets(ctx, *input)
             } else {
@@ -2141,6 +2749,24 @@ impl Analyzer<'_> {
                 });
             }
             prepared.push(OriginValue::from_origins(origins));
+        }
+
+        // A callee can still write the `mut` fields of what it is handed, and
+        // its own checks cannot see the loans this caller holds. Rejecting a
+        // call whose write would invalidate a live borrow *into* one of those
+        // fields is all that is needed — the write lasts only for the call, so
+        // no loan outlives this check.
+        for path in self.interior_write_places(ctx, inputs, modes, fid) {
+            self.borrow_conflicts_named_ext(
+                ctx,
+                &path,
+                BorrowKind::Mutable,
+                &HashSet::new(),
+                span,
+                &Self::expr_name(ctx, call),
+                false,
+                true,
+            );
         }
 
         let may_carry_reference = self.expr_may_carry_reference(ctx, call);
@@ -2352,6 +2978,7 @@ impl Analyzer<'_> {
                     span,
                     &name,
                     source.behind_reference,
+                    false,
                 ) {
                     None
                 } else {
@@ -2411,10 +3038,32 @@ impl Analyzer<'_> {
     fn create_borrow(
         &mut self,
         ctx: &mut BodyCtx<'_>,
+        borrow_expr: ExprId,
         operand: ExprId,
         kind: BorrowKind,
         span: Option<TextRange>,
     ) -> Origins {
+        // A `&mut` of a place reached through a shared reference would hand out
+        // write access the borrow does not have. Checking here covers every
+        // position a `&mut` can appear in — a binding, a return value, a struct
+        // field, an argument — while implicit receiver borrows have no `&mut`
+        // expression to check and are handled at the call site.
+        if kind == BorrowKind::Mutable && self.reached_through_shared_reference(ctx, operand) {
+            let name = Self::expr_name(ctx, operand);
+            // A `mut` field is writable through the borrow, but only for the
+            // call it is written in: anywhere else the `&mut` could be bound,
+            // returned or stored, and two of them could then alias.
+            let call_scoped = self.path_has_mut_field(ctx, operand)
+                && ctx.call_borrow_exprs.contains(&borrow_expr);
+            if !call_scoped {
+                self.diag(
+                    format!("cannot borrow `{name}` as mutable through a shared reference"),
+                    span,
+                    "E0309",
+                );
+                return Origins::new();
+            }
+        }
         let mut origins = Origins::new();
         for target in self.access_targets(ctx, operand) {
             if self.borrow_conflicts(ctx, &target.place, kind, &target.parents, span, operand) {
@@ -2446,7 +3095,7 @@ impl Analyzer<'_> {
         expr_id: ExprId,
     ) -> bool {
         let name = Self::expr_name(ctx, expr_id);
-        self.borrow_conflicts_named_ext(ctx, place, kind, parents, span, &name, false)
+        self.borrow_conflicts_named_ext(ctx, place, kind, parents, span, &name, false, false)
     }
 
     fn borrow_conflicts_named(
@@ -2458,7 +3107,7 @@ impl Analyzer<'_> {
         span: Option<TextRange>,
         name: &str,
     ) -> bool {
-        self.borrow_conflicts_named_ext(ctx, place, kind, parents, span, name, false)
+        self.borrow_conflicts_named_ext(ctx, place, kind, parents, span, name, false, false)
     }
 
     /// `attempted_behind_reference` marks borrows whose region lives behind
@@ -2476,14 +3125,22 @@ impl Analyzer<'_> {
         span: Option<TextRange>,
         name: &str,
         attempted_behind_reference: bool,
+        attempted_interior_write: bool,
     ) -> bool {
         let conflict = ctx.loans.iter().find_map(|(id, loan)| {
             (loan.active
                 && !parents.contains(id)
                 && loan.behind_reference == attempted_behind_reference
                 && access_places_overlap(&loan.place, place)
-                && !(loan.kind == BorrowKind::Shared && kind == BorrowKind::Shared))
-                .then(|| loan.clone())
+                && !(loan.kind == BorrowKind::Shared && kind == BorrowKind::Shared)
+                // A shared borrow of an enclosing place does not freeze a `mut`
+                // field inside it — that is what the declaration is for. A
+                // borrow *into* the field is a different matter and still
+                // conflicts, because the write can move what it points at.
+                && !(attempted_interior_write
+                    && loan.kind == BorrowKind::Shared
+                    && access_place_encloses(&loan.place, place)))
+            .then(|| loan.clone())
         });
         let Some(conflict) = conflict else {
             return false;
@@ -3040,6 +3697,10 @@ impl Analyzer<'_> {
                 "borrow through the reference, or implement `Copy` when duplication is intended"
                     .into(),
             ],
+            "E0309" => vec![
+                "a shared reference does not permit mutation; take `&mut` or return an owned value"
+                    .into(),
+            ],
             _ => Vec::new(),
         };
         let mut labels = vec![SourceLabel {
@@ -3128,6 +3789,11 @@ struct BodyCtx<'a> {
     /// Generic bounds in scope for this body (`T: Copy`, plus the enclosing
     /// impl's bounds), so a parameter type is copyable when its bound says so.
     bounds: &'a [TraitBound],
+    /// `&mut` expressions that appear directly as a call's receiver or
+    /// argument. A `&mut` of a `mut` field reached through a shared reference
+    /// is confined to the call it is written in, so only these are allowed;
+    /// anywhere else the borrow could be bound or returned.
+    call_borrow_exprs: HashSet<ExprId>,
 }
 
 impl<'a> BodyCtx<'a> {
@@ -3159,6 +3825,7 @@ impl<'a> BodyCtx<'a> {
             in_match_guard: false,
             guard_scrutinee: Vec::new(),
             bounds,
+            call_borrow_exprs: collect_call_borrow_exprs(body),
         }
     }
 
@@ -3650,6 +4317,17 @@ fn place_has_wildcard_index(place: &Place) -> bool {
         .any(|projection| matches!(projection, hir::place::Projection::Index(None)))
 }
 
+/// The place expression behind an explicit `&`/`&mut`, when there is one.
+fn peel_reference(ctx: &BodyCtx<'_>, expr: ExprId) -> ExprId {
+    match &ctx.body.exprs[expr] {
+        Expr::Unary {
+            operand,
+            op: UnaryOp::Ref | UnaryOp::MutRef,
+        } => *operand,
+        _ => expr,
+    }
+}
+
 fn access_places_overlap(a: &AccessPlace, b: &AccessPlace) -> bool {
     if a.root != b.root {
         return false;
@@ -3670,6 +4348,18 @@ fn access_places_overlap(a: &AccessPlace, b: &AccessPlace) -> bool {
         }
     }
     true
+}
+
+/// Whether `outer` names the same place as `inner` or a prefix of it, so
+/// `inner` is storage inside `outer`.
+fn access_place_encloses(outer: &AccessPlace, inner: &AccessPlace) -> bool {
+    outer.root == inner.root
+        && outer.projections.len() <= inner.projections.len()
+        && outer
+            .projections
+            .iter()
+            .zip(&inner.projections)
+            .all(|(left, right)| left == right)
 }
 
 fn access_place_from_move_place(place: &Place) -> AccessPlace {
@@ -3763,6 +4453,38 @@ fn callable_parameter_modes(ty: &Type) -> Option<Vec<Option<BorrowKind>>> {
         }
         _ => None,
     }
+}
+
+/// `&mut` expressions written directly as a call's receiver or argument.
+///
+/// A `&mut` of a `mut` field reached through a shared reference is only sound
+/// for the call it is written in — the callee borrows the field for the
+/// duration of the call and cannot keep it. Every other position (a binding, a
+/// return value, a struct field) would let the borrow outlive the statement.
+fn collect_call_borrow_exprs(body: &Body) -> HashSet<ExprId> {
+    let mut exprs = HashSet::new();
+    for (_, expr) in body.exprs.iter() {
+        let Expr::Call { callee, args, .. } = expr else {
+            continue;
+        };
+        for candidate in args.iter().copied().chain(std::iter::once(*callee)) {
+            // A method call's receiver is the base of the field access.
+            let receiver = match &body.exprs[candidate] {
+                Expr::FieldAccess { base, .. } => *base,
+                _ => candidate,
+            };
+            if matches!(
+                body.exprs[receiver],
+                Expr::Unary {
+                    op: UnaryOp::MutRef,
+                    ..
+                }
+            ) {
+                exprs.insert(receiver);
+            }
+        }
+    }
+    exprs
 }
 
 fn collect_local_uses(body: &Body) -> HashMap<PatternBindingId, usize> {

@@ -718,7 +718,7 @@ impl<'a> ScopeGraphBuilder<'a> {
         frag_edges: &mut Vec<EdgeId>,
     ) {
         let imp = &self.hir.item_tree.impls[iid];
-        let associated_scope = self.impl_scope_for_self_ty(&imp.self_ty);
+        let associated_scope = self.impl_scope_for_self_ty(&imp.self_ty, imp.self_ty_range);
         let item_scope = match associated_scope {
             Some(scope) => scope,
             None => {
@@ -775,17 +775,40 @@ impl<'a> ScopeGraphBuilder<'a> {
         }
     }
 
-    fn impl_scope_for_self_ty(&self, self_ty: &HirTypeRef) -> Option<NodeId> {
+    /// The impl scope belonging to the struct an `impl` block is written for.
+    ///
+    /// The scope is keyed by struct id, and a name alone does not identify one:
+    /// every package contributes its top-level items to the same graph, so
+    /// `impl<I, J, T> Iterator for Chain<I, J, T>` in std and a user's own
+    /// `struct Chain` share the name. The struct declared in the impl's own
+    /// package wins; a single match is unaffected.
+    fn impl_scope_for_self_ty(
+        &self,
+        self_ty: &HirTypeRef,
+        self_ty_range: TextRange,
+    ) -> Option<NodeId> {
         let HirTypeRef::Named(path) = self_ty else {
             return None;
         };
         let name = path.as_single_name()?;
+        let package = self.hir.package_for_range(self_ty_range);
+        let by_name = |strukt: &hir::item_tree::HirStruct| strukt.name == *name;
         let sid = self
             .hir
             .item_tree
             .structs
             .iter()
-            .find_map(|(sid, strukt)| (strukt.name == *name).then_some(sid))?;
+            .find_map(|(sid, strukt)| {
+                (by_name(strukt) && self.hir.package_for_range(strukt.name_range) == package)
+                    .then_some(sid)
+            })
+            .or_else(|| {
+                self.hir
+                    .item_tree
+                    .structs
+                    .iter()
+                    .find_map(|(sid, strukt)| by_name(strukt).then_some(sid))
+            })?;
         self.sg.impl_scopes_by_struct.get(&sid).copied()
     }
 

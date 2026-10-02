@@ -17,6 +17,8 @@ pub struct CBackend {
     ctypes: Vec<String>,
     /// Value -> `StructType` mapping for field name lookup in `ExtractValue`.
     struct_types: HashMap<u32, StructType>,
+    /// C type name of an allocated payload -> its GC layout descriptor symbol.
+    descriptors: HashMap<String, String>,
     /// Count of how many times each value is referenced as an operand.
     use_counts: HashMap<u32, u32>,
     /// Expression text for values inlined at use sites (no variable emitted).
@@ -163,6 +165,7 @@ impl Backend for CBackend {
         let mut out = String::new();
         self.emit_module_prelude(module, &mut out);
         Self::emit_type_declarations(module, &mut out);
+        self.emit_gc_descriptors(module, &mut out);
         self.emit_function_declarations(module, &mut out)?;
         for &fid in &module.function_order {
             let function = &module.functions[fid];
@@ -244,7 +247,11 @@ impl CBackend {
                 writeln!(out, "void riddle_free(void *ptr);").unwrap();
             } else {
                 writeln!(out, "void rgc_init(void *stack_bottom);").unwrap();
-                writeln!(out, "void *rgc_alloc(size_t size);").unwrap();
+                writeln!(
+                    out,
+                    "void *rgc_alloc(size_t size, const uint32_t *descriptor);"
+                )
+                .unwrap();
                 writeln!(out, "void rgc_free(void *ptr);").unwrap();
                 writeln!(out, "void rgc_collect(void);").unwrap();
             }
@@ -350,7 +357,7 @@ impl CBackend {
     fn emit_type_declarations(module: &Module, out: &mut String) {
         let structs = collect_structs(module);
         for strukt in &structs {
-            let name = c_type_name(&strukt.symbol);
+            let name = c_type_name(strukt.symbol());
             writeln!(out, "typedef struct {name} {name};").unwrap();
         }
         if !structs.is_empty() {
@@ -380,11 +387,12 @@ impl CBackend {
         writeln!(out).unwrap();
 
         for s in &structs {
-            writeln!(out, "struct {} {{", c_type_name(&s.symbol)).unwrap();
-            if s.fields.is_empty() {
+            let def = s.def();
+            writeln!(out, "struct {} {{", c_type_name(&def.symbol)).unwrap();
+            if def.fields.is_empty() {
                 writeln!(out, "  unsigned char _riddle_zst;").unwrap();
             }
-            for (name, ty) in &s.fields {
+            for (name, ty) in &def.fields {
                 if matches!(ty, Type::Unit | Type::Never | Type::Void) {
                     writeln!(out, "  unsigned char {};", c_source_name('m', name)).unwrap();
                     continue;
@@ -760,22 +768,96 @@ impl CBackend {
         let inner_ct = pointee_ct(&inst.ty);
         let name = fresh_c(&mut self.counter, "h");
         self.set(value, name.clone(), ct.clone());
+        if self.no_gc {
+            writeln!(
+                out,
+                "  {} {} = ({})riddle_alloc(sizeof({}));",
+                ct, name, ct, inner_ct
+            )
+            .unwrap();
+            return;
+        }
+        let descriptor = self
+            .descriptors
+            .get(&inner_ct)
+            .cloned()
+            .unwrap_or_else(|| "NULL".to_owned());
         writeln!(
             out,
-            "  {} {} = ({}){}(sizeof({}));",
-            ct,
-            name,
-            ct,
-            if self.no_gc {
-                "riddle_alloc"
-            } else {
-                "rgc_alloc"
-            },
-            inner_ct
+            "  {} {} = ({})rgc_alloc(sizeof({}), {});",
+            ct, name, ct, inner_ct, descriptor
         )
         .unwrap();
     }
 
+    /// Emit one GC layout descriptor per type that reaches the collector
+    /// through heap_alloc. A descriptor lists the byte offsets of that type's
+    /// pointer slots, so the runtime marks exactly those and skips the rest:
+    /// an integer that happens to look like an address no longer keeps an
+    /// object alive. Types without a faithful description get no table at
+    /// all, and their allocation site passes NULL, which keeps the old
+    /// conservative word-by-word payload scan.
+    fn emit_gc_descriptors(&mut self, module: &Module, out: &mut String) {
+        if self.no_gc {
+            return;
+        }
+        let mut pointees: Vec<(String, Type)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for &fid in &module.function_order {
+            let func = &module.functions[fid];
+            // A descriptor is only worth emitting for a function whose body is
+            // actually written out, otherwise the table is unused and trips
+            // -Wunused-const-variable in builds that treat warnings as errors.
+            if !self.should_emit(func) {
+                continue;
+            }
+            for (_, block) in func.blocks.iter() {
+                for inst in &block.insts {
+                    let InstKind::HeapAlloc(ty) = &inst.kind else {
+                        continue;
+                    };
+                    let Type::Ptr(inner) = ty else {
+                        continue;
+                    };
+                    let key = pointee_ct(ty);
+                    if seen.insert(key.clone()) {
+                        pointees.push((key, inner.as_ref().clone()));
+                    }
+                }
+            }
+        }
+        if pointees.is_empty() {
+            return;
+        }
+        writeln!(
+            out,
+            "/* GC layout descriptors: pointer slots per allocated type. */"
+        )
+        .unwrap();
+        for (index, (key, ty)) in pointees.iter().enumerate() {
+            let Some(offsets) = gc_pointer_offsets(ty) else {
+                continue;
+            };
+            let symbol = format!("riddle_desc_{index}");
+            if offsets.is_empty() {
+                writeln!(out, "static const uint32_t {symbol}[] = {{ 0u }};").unwrap();
+            } else {
+                let slots = offsets
+                    .iter()
+                    .map(|offset| format!("(uint32_t){offset}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(
+                    out,
+                    "static const uint32_t {symbol}[] = {{ {}u, {slots} }};",
+                    offsets.len()
+                )
+                .unwrap();
+            }
+            self.descriptors.insert(key.clone(), symbol);
+        }
+        writeln!(out).unwrap();
+    }
     fn emit_heap_free(&self, ptr: Value, out: &mut String) {
         writeln!(
             out,
@@ -1019,13 +1101,15 @@ impl CBackend {
             .unwrap();
         } else if let Type::Struct(strukt) = &inst.ty
             && strukt
+                .def()
                 .fields
                 .iter()
                 .any(|(_, field_ty)| matches!(field_ty, Type::Array(_, _)))
         {
             writeln!(out, "  {ct} {name} = {{0}};").unwrap();
+            let def = strukt.def();
             for (index, value) in fields.iter().enumerate() {
-                let Some((field_name, field_ty)) = strukt.fields.get(index) else {
+                let Some((field_name, field_ty)) = def.fields.get(index) else {
                     continue;
                 };
                 let field = c_source_name('m', field_name);
@@ -1068,8 +1152,9 @@ impl CBackend {
         let Type::Struct(strukt) = &inst.ty else {
             return Err("sparse aggregate initializer requires a struct type".into());
         };
+        let def = strukt.def();
         for (index, value) in fields {
-            let Some((field_name, field_ty)) = strukt.fields.get(*index) else {
+            let Some((field_name, field_ty)) = def.fields.get(*index) else {
                 return Err(format!("aggregate field index {index} is out of bounds"));
             };
             let field = c_source_name('m', field_name);
@@ -1199,9 +1284,12 @@ impl CBackend {
                 _ => return Err(format!("fat pointer field index {index} is out of bounds")),
             }
         } else {
-            self.struct_types
+            let def = self
+                .struct_types
                 .get(&aggregate.0)
-                .and_then(|strukt| strukt.fields.get(index))
+                .map(|strukt| strukt.def());
+            def.as_ref()
+                .and_then(|def| def.fields.get(index))
                 .map_or_else(
                     || c_source_name('m', &format!("f{index}")),
                     |(name, _)| c_source_name('m', name),
@@ -1239,10 +1327,10 @@ impl CBackend {
     ) {
         let ct = ctype_of(&inst.ty);
         let base_name = self.name(base).to_owned();
-        let (field, field_ty) = self
-            .struct_types
-            .get(&base.0)
-            .and_then(|strukt| strukt.fields.get(index))
+        let def = self.struct_types.get(&base.0).map(|strukt| strukt.def());
+        let (field, field_ty) = def
+            .as_ref()
+            .and_then(|def| def.fields.get(index))
             .map_or_else(
                 || (c_source_name('m', &format!("f{index}")), None),
                 |(name, ty)| (c_source_name('m', name), Some(ty)),
@@ -1405,7 +1493,21 @@ impl CBackend {
                 "  size_t {ffi_len} = {ffi_name} ? strlen({ffi_name}) : 0;"
             )
             .unwrap();
-            writeln!(out, "  char* {ffi_copy} = (char*)rgc_alloc({ffi_len} + 1);").unwrap();
+            // A copied C string holds bytes, not GC pointers, so it carries no
+            // layout descriptor; the no-GC runtime keeps its own allocator.
+            if self.no_gc {
+                writeln!(
+                    out,
+                    "  char* {ffi_copy} = (char*)riddle_alloc({ffi_len} + 1);"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "  char* {ffi_copy} = (char*)rgc_alloc({ffi_len} + 1, NULL);"
+                )
+                .unwrap();
+            }
             writeln!(
                 out,
                 "  if ({ffi_name}) {{ memcpy({ffi_copy}, {ffi_name}, {ffi_len} + 1); }}"
@@ -1547,34 +1649,35 @@ fn collect_structs(module: &Module) -> Vec<StructType> {
     }
     let mut out: Vec<StructType> = seen.into_values().collect();
     out.sort_by(|a, b| {
-        struct_depth(a)
-            .cmp(&struct_depth(b))
-            .then_with(|| a.symbol.cmp(&b.symbol))
+        struct_depth(a, &mut HashSet::new())
+            .cmp(&struct_depth(b, &mut HashSet::new()))
+            .then_with(|| a.symbol().cmp(b.symbol()))
     });
     out
 }
 
 fn collect_fn_ptrs(module: &Module) -> Vec<FnPtrType> {
     let mut seen = HashSet::new();
+    let mut visited_structs = HashSet::new();
     for &fid in &module.function_order {
         let function = &module.functions[fid];
-        collect_fn_ptr_type(&function.ret_type, &mut seen);
+        collect_fn_ptr_type(&function.ret_type, &mut seen, &mut visited_structs);
         for param in &function.params {
-            collect_fn_ptr_type(&param.ty, &mut seen);
+            collect_fn_ptr_type(&param.ty, &mut seen, &mut visited_structs);
         }
         for (_, block) in function.blocks.iter() {
             for inst in &block.insts {
-                collect_fn_ptr_type(&inst.ty, &mut seen);
+                collect_fn_ptr_type(&inst.ty, &mut seen, &mut visited_structs);
                 if let InstKind::SizeOf(ty) = &inst.kind {
-                    collect_fn_ptr_type(ty, &mut seen);
+                    collect_fn_ptr_type(ty, &mut seen, &mut visited_structs);
                 }
             }
         }
     }
     for external in &module.externs {
-        collect_fn_ptr_type(&external.ret_type, &mut seen);
+        collect_fn_ptr_type(&external.ret_type, &mut seen, &mut visited_structs);
         for param in &external.params {
-            collect_fn_ptr_type(param, &mut seen);
+            collect_fn_ptr_type(param, &mut seen, &mut visited_structs);
         }
     }
     let mut signatures = seen.into_iter().collect::<Vec<_>>();
@@ -1582,27 +1685,32 @@ fn collect_fn_ptrs(module: &Module) -> Vec<FnPtrType> {
     signatures
 }
 
-fn collect_fn_ptr_type(ty: &Type, seen: &mut HashSet<FnPtrType>) {
+fn collect_fn_ptr_type(ty: &Type, seen: &mut HashSet<FnPtrType>, visited: &mut HashSet<String>) {
     match ty {
         Type::FnPtr(signature) => {
             if seen.insert(signature.clone()) {
                 for param in &signature.params {
-                    collect_fn_ptr_type(param, seen);
+                    collect_fn_ptr_type(param, seen, visited);
                 }
-                collect_fn_ptr_type(&signature.ret, seen);
+                collect_fn_ptr_type(&signature.ret, seen, visited);
             }
         }
         Type::Struct(strukt) => {
-            for (_, field) in &strukt.fields {
-                collect_fn_ptr_type(field, seen);
+            // A recursive struct reaches itself through a reference; visiting
+            // each definition once is what keeps this walk finite.
+            if !visited.insert(strukt.symbol().to_string()) {
+                return;
+            }
+            for (_, field) in &strukt.def().fields {
+                collect_fn_ptr_type(field, seen, visited);
             }
         }
         Type::Ptr(inner) | Type::Ref(inner, _) | Type::Array(inner, _) | Type::Slice(inner) => {
-            collect_fn_ptr_type(inner, seen);
+            collect_fn_ptr_type(inner, seen, visited);
         }
         Type::Tuple(elements) => {
             for element in elements {
-                collect_fn_ptr_type(element, seen);
+                collect_fn_ptr_type(element, seen, visited);
             }
         }
         _ => {}
@@ -1684,10 +1792,11 @@ fn module_calls_c_string_extern(module: &Module) -> bool {
 fn collect_struct_type(ty: &Type, seen: &mut HashMap<String, StructType>) {
     match ty {
         Type::Struct(st) => {
-            if seen.insert(st.symbol.clone(), st.clone()).is_some() {
+            if seen.insert(st.symbol().to_string(), st.clone()).is_some() {
                 return;
             }
-            for (_, field_ty) in &st.fields {
+            let def = st.def();
+            for (_, field_ty) in &def.fields {
                 collect_struct_type(field_ty, seen);
             }
         }
@@ -1696,7 +1805,7 @@ fn collect_struct_type(ty: &Type, seen: &mut HashMap<String, StructType>) {
         }
         Type::Tuple(elements) => {
             let tuple = tuple_struct_type(elements);
-            if seen.insert(tuple.symbol.clone(), tuple).is_some() {
+            if seen.insert(tuple.symbol().to_string(), tuple).is_some() {
                 return;
             }
             for element in elements {
@@ -1713,22 +1822,35 @@ fn collect_struct_type(ty: &Type, seen: &mut HashMap<String, StructType>) {
     }
 }
 
-fn struct_depth(st: &StructType) -> usize {
-    1 + st
+/// Nesting depth of the structs a definition contains, used to emit C
+/// definitions before the definitions that embed them.
+///
+/// `visiting` holds the definitions currently being walked: a recursive struct
+/// is reached from inside its own fields, and that occurrence contributes no
+/// depth because it is always behind a pointer, which a forward `typedef`
+/// already satisfies.
+fn struct_depth(st: &StructType, visiting: &mut HashSet<String>) -> usize {
+    if !visiting.insert(st.symbol().to_string()) {
+        return 0;
+    }
+    let depth = 1 + st
+        .def()
         .fields
         .iter()
-        .map(|(_, ty)| type_struct_depth(ty))
+        .map(|(_, ty)| type_struct_depth(ty, visiting))
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    visiting.remove(st.symbol());
+    depth
 }
 
-fn type_struct_depth(ty: &Type) -> usize {
+fn type_struct_depth(ty: &Type, visiting: &mut HashSet<String>) -> usize {
     match ty {
-        Type::Struct(st) => struct_depth(st),
+        Type::Struct(st) => struct_depth(st, visiting),
         Type::Ptr(inner) | Type::Ref(inner, _) | Type::Array(inner, _) | Type::Slice(inner) => {
-            type_struct_depth(inner)
+            type_struct_depth(inner, visiting)
         }
-        Type::Tuple(elements) => struct_depth(&tuple_struct_type(elements)),
+        Type::Tuple(elements) => struct_depth(&tuple_struct_type(elements), visiting),
         _ => 0,
     }
 }
@@ -1815,6 +1937,96 @@ fn c_callable_return_type(ty: &Type) -> String {
     }
 }
 
+/// Upper bound on the pointer slots a single descriptor may list. Beyond it
+/// the type falls back to a NULL descriptor, i.e. a conservative payload scan.
+const RGC_MAX_DESCRIPTOR_SLOTS: usize = 512;
+
+/// Whether a layout contains at least one GC pointer slot.
+fn type_has_gc_pointer(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(_) | Type::Ref(..) | Type::Str | Type::Slice(_) => true,
+        Type::Struct(st) => st.def().fields.iter().any(|(_, field)| {
+            !matches!(field, Type::Unit | Type::Never | Type::Void) && type_has_gc_pointer(field)
+        }),
+        Type::Tuple(elements) => elements.iter().any(type_has_gc_pointer),
+        Type::Array(element, _) => type_has_gc_pointer(element),
+        _ => false,
+    }
+}
+
+/// C constant expressions for every GC pointer slot inside a payload layout.
+///
+/// None means the layout has no faithful description (an unsupported shape,
+/// or more slots than RGC_MAX_DESCRIPTOR_SLOTS). The caller then publishes a
+/// NULL descriptor for that type, and the collector scans those payloads word
+/// by word: always sound, but it can keep an object alive longer than needed.
+fn gc_pointer_offsets(ty: &Type) -> Option<Vec<String>> {
+    if !type_has_gc_pointer(ty) {
+        return Some(Vec::new());
+    }
+    let mut offsets = Vec::new();
+    gc_pointer_offsets_at(ty, "0", &mut offsets)?;
+    Some(offsets)
+}
+
+fn gc_pointer_offsets_at(ty: &Type, base: &str, offsets: &mut Vec<String>) -> Option<()> {
+    if offsets.len() >= RGC_MAX_DESCRIPTOR_SLOTS {
+        return None;
+    }
+    match ty {
+        Type::Ptr(_) => offsets.push(base.to_owned()),
+        // A fat repr (&str, &[T], str, [T]) is a {pointer, length} pair, so
+        // only its first member is a slot.
+        Type::Str | Type::Slice(_) => {
+            offsets.push(format!("(offsetof({}, ptr) + ({}))", ctype_of(ty), base));
+        }
+        Type::Ref(inner, _) => {
+            if inner.is_sized() {
+                offsets.push(base.to_owned());
+            } else {
+                offsets.push(format!("(offsetof({}, ptr) + ({}))", ctype_of(ty), base));
+            }
+        }
+        Type::Struct(_) | Type::Tuple(_) => {
+            let handle = match ty {
+                Type::Struct(st) => st.clone(),
+                Type::Tuple(elements) => tuple_struct_type(elements),
+                _ => return None,
+            };
+            let struct_ctype = ctype_of(ty);
+            for (name, field_ty) in &handle.def().fields {
+                if matches!(field_ty, Type::Unit | Type::Never | Type::Void)
+                    || !type_has_gc_pointer(field_ty)
+                {
+                    continue;
+                }
+                let field_base = format!(
+                    "(offsetof({}, {}) + ({}))",
+                    struct_ctype,
+                    c_source_name('m', name),
+                    base
+                );
+                gc_pointer_offsets_at(field_ty, &field_base, offsets)?;
+            }
+        }
+        Type::Array(element, len) => {
+            if !type_has_gc_pointer(element) {
+                return Some(());
+            }
+            for index in 0..*len {
+                let element_base =
+                    format!("(sizeof({}) * {} + ({}))", ctype_of(element), index, base);
+                gc_pointer_offsets_at(element, &element_base, offsets)?;
+            }
+        }
+        // An enum that reached the backend without being lowered to its
+        // tagged struct has no layout the collector can trust.
+        Type::Enum(_) => return None,
+        // Function pointers are code addresses, never GC payloads.
+        _ => {}
+    }
+    Some(())
+}
 fn ctype_of(ty: &Type) -> String {
     match ty {
         Type::Int(ity) => match ity {
@@ -1843,7 +2055,7 @@ fn ctype_of(ty: &Type) -> String {
             Type::Slice(_) => "riddle_slice".into(),
             _ => pointer_ctype(inner),
         },
-        Type::Struct(s) => c_type_name(&s.symbol),
+        Type::Struct(s) => c_type_name(s.symbol()),
         Type::Array(..) => {
             let (prefix, suffix) = c_decl_parts(ty);
             format!("{prefix}{suffix}")
@@ -1912,15 +2124,15 @@ fn pointer_ctype(inner: &Type) -> String {
 
 fn tuple_struct_type(elements: &[Type]) -> StructType {
     let name = tuple_name(elements);
-    StructType {
-        symbol: name.clone(),
+    StructType::defined(
+        name.clone(),
         name,
-        fields: elements
+        elements
             .iter()
             .enumerate()
             .map(|(index, ty)| (format!("f{index}"), ty.clone()))
             .collect(),
-    }
+    )
 }
 
 fn tuple_name(elements: &[Type]) -> String {

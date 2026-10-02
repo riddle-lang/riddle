@@ -1187,6 +1187,19 @@ impl LowerCtx<'_> {
                     .iter()
                     .map(|arg| self.lower_hir_type_for_pattern(arg, subst))
                     .collect::<Vec<_>>();
+                // The scope graph knows which item the name refers to; a name
+                // scan cannot, and would pick a same-named item from another
+                // package (a self-reference like `&Chain` would resolve to
+                // std's own `Chain`).
+                match self.hir.type_resolutions.get(&path.range) {
+                    Some(hir::body::ResolvedName::Struct(id)) => {
+                        return type_checker::Type::Struct(*id, args);
+                    }
+                    Some(hir::body::ResolvedName::Enum(id)) => {
+                        return type_checker::Type::Enum(*id, args);
+                    }
+                    _ => {}
+                }
                 if let Some((id, _)) = self
                     .hir
                     .item_tree
