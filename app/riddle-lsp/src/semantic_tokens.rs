@@ -17,7 +17,7 @@ use crate::{
     completion::BUILTIN_TYPES,
     server::Document,
     session::AnalysisSessions,
-    text::{is_identifier_continue, ranges_overlap, text_range},
+    text::{LineIndex, is_identifier_continue, offset_for_position, ranges_overlap, text_range},
 };
 
 #[must_use]
@@ -187,10 +187,59 @@ pub fn semantic_tokens_for_document_cancellable<S: BuildHasher>(
     )))
 }
 
+/// Semantic tokens restricted to `range`, for clients that only render a
+/// visible window of a large file.
+pub fn semantic_tokens_for_document_range_cancellable<S: BuildHasher>(
+    uri: &lsp_types::Url,
+    docs: &HashMap<lsp_types::Url, Document, S>,
+    range: lsp_types::Range,
+    options: CompileOptions,
+    sessions: &AnalysisSessions,
+    cancelled: &impl Fn() -> bool,
+) -> std::result::Result<Option<SemanticTokens>, String> {
+    let document = docs
+        .get(uri)
+        .ok_or_else(|| "document is not open".to_string())?;
+    let Some(analysis) = analyze_document_cancellable(
+        uri,
+        docs,
+        options,
+        sessions,
+        AnalysisDepth::Resolve,
+        cancelled,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(semantic_tokens_from_analysis_range(
+        &document.text,
+        &analysis,
+        is_standard_library_uri(uri),
+        range,
+    )))
+}
+
 fn semantic_tokens_from_analysis(
     document_source: &str,
     analysis: &DocumentAnalysis,
     default_library_source: bool,
+) -> SemanticTokens {
+    semantic_tokens_from_analysis_range(
+        document_source,
+        analysis,
+        default_library_source,
+        lsp_types::Range::new(
+            lsp_types::Position::new(0, 0),
+            lsp_types::Position::new(u32::MAX, u32::MAX),
+        ),
+    )
+}
+
+fn semantic_tokens_from_analysis_range(
+    document_source: &str,
+    analysis: &DocumentAnalysis,
+    default_library_source: bool,
+    range: lsp_types::Range,
 ) -> SemanticTokens {
     let tokens = frontend::lexer::lex(document_source);
     let mut raw_tokens = Vec::new();
@@ -201,16 +250,18 @@ fn semantic_tokens_from_analysis(
         else {
             continue;
         };
-        let text = token.text(document_source);
-        if text.contains('\n') {
-            continue;
+        // A token that spans several lines is emitted once per line rather than
+        // dropped: multi-line block comments and doc comments are common in
+        // this language's sources, and dropping them left whole regions of a
+        // file unhighlighted.
+        for range in split_token_lines(document_source, token) {
+            raw_tokens.push(RawSemanticToken {
+                range,
+                token_type,
+                token_modifiers_bitset,
+                resolved: false,
+            });
         }
-        raw_tokens.push(RawSemanticToken {
-            range: text_range(token.span.start, token.span.end),
-            token_type,
-            token_modifiers_bitset,
-            resolved: false,
-        });
     }
 
     for occurrence in &analysis.macro_occurrences {
@@ -240,7 +291,50 @@ fn semantic_tokens_from_analysis(
         );
     }
 
-    encode_semantic_tokens(document_source, remove_overlapping_tokens(raw_tokens))
+    encode_semantic_tokens(
+        document_source,
+        remove_overlapping_tokens(raw_tokens),
+        Some(range),
+    )
+}
+
+/// Splits a lexer token into one range per line, trimming the trailing `\r`.
+///
+/// Single-line tokens come back unchanged except for a trailing `\r`, so this
+/// costs one scan of the token's own text. A `\r` left inside the range would
+/// count against the token's length while the encoder drops it from the text.
+fn split_token_lines(source: &str, token: &frontend::lexer::Token) -> Vec<rowan::TextRange> {
+    let text = token.text(source);
+    let trim_carriage_return = |mut range: rowan::TextRange| {
+        if source[usize::from(range.start())..usize::from(range.end())].ends_with('\r') {
+            range = text_range(usize::from(range.start()), usize::from(range.end()) - 1);
+        }
+        range
+    };
+    if !text.contains('\n') {
+        return vec![trim_carriage_return(text_range(
+            token.span.start,
+            token.span.end,
+        ))];
+    }
+    let mut ranges = Vec::new();
+    let mut line_start = token.span.start;
+    for (offset, ch) in text.char_indices() {
+        if ch != '\n' {
+            continue;
+        }
+        let line_end = line_start + offset;
+        let range = trim_carriage_return(text_range(line_start, line_end));
+        if usize::from(range.end()) > usize::from(range.start()) {
+            ranges.push(range);
+        }
+        line_start += offset + 1;
+    }
+    let range = trim_carriage_return(text_range(line_start, token.span.end));
+    if usize::from(range.end()) > usize::from(range.start()) {
+        ranges.push(range);
+    }
+    ranges
 }
 
 fn is_standard_library_uri(uri: &lsp_types::Url) -> bool {
@@ -699,17 +793,32 @@ const fn preferred_token_priority(
     )
 }
 
-fn encode_semantic_tokens(source: &str, raw_tokens: Vec<RawSemanticToken>) -> SemanticTokens {
+fn encode_semantic_tokens(
+    source: &str,
+    raw_tokens: Vec<RawSemanticToken>,
+    range: Option<lsp_types::Range>,
+) -> SemanticTokens {
     let mut data = Vec::new();
-    let mut cursor = 0;
-    let mut line = 0;
-    let mut character = 0;
     let mut prev_line = 0;
     let mut prev_start = 0;
+    let line_index = LineIndex::new(source);
+    // A token counts as inside the window when it overlaps it at all, which is
+    // what the specification asks for and what clients expect when a token
+    // straddles a fold boundary.
+    let filter = range.and_then(|range| {
+        let start = offset_for_position(source, range.start)?;
+        let end = offset_for_position(source, range.end)?;
+        Some((start, end))
+    });
 
     for token in raw_tokens {
         let start_offset = usize::from(token.range.start());
         let end_offset = usize::from(token.range.end());
+        if let Some((window_start, window_end)) = filter
+            && (end_offset <= window_start || start_offset >= window_end)
+        {
+            continue;
+        }
         let Some(text) = source.get(start_offset..end_offset) else {
             continue;
         };
@@ -718,27 +827,21 @@ fn encode_semantic_tokens(source: &str, raw_tokens: Vec<RawSemanticToken>) -> Se
             continue;
         }
 
-        let Some(skipped) = source.get(cursor..start_offset) else {
+        // Positions come from the negotiated encoding rather than a hardcoded
+        // UTF-16 count, so a UTF-8 or UTF-32 client gets the columns it asked
+        // for.
+        let Some(position) = line_index.position(source, start_offset) else {
             continue;
         };
-        for ch in skipped.chars() {
-            if ch == '\n' {
-                line += 1;
-                character = 0;
-            } else {
-                character +=
-                    u32::try_from(ch.len_utf16()).expect("a char uses at most two UTF-16 units");
-            }
-        }
-        cursor = start_offset;
-
-        let length = u32::try_from(text.chars().map(char::len_utf16).sum::<usize>())
-            .expect("semantic token length should fit in u32");
-        let delta_line = line - prev_line;
+        let Some(end_position) = line_index.position(source, end_offset) else {
+            continue;
+        };
+        let length = end_position.character - position.character;
+        let delta_line = position.line - prev_line;
         let delta_start = if delta_line == 0 {
-            character - prev_start
+            position.character - prev_start
         } else {
-            character
+            position.character
         };
 
         data.push(SemanticToken {
@@ -748,8 +851,8 @@ fn encode_semantic_tokens(source: &str, raw_tokens: Vec<RawSemanticToken>) -> Se
             token_type: token.token_type,
             token_modifiers_bitset: token.token_modifiers_bitset,
         });
-        prev_line = line;
-        prev_start = character;
+        prev_line = position.line;
+        prev_start = position.character;
     }
 
     SemanticTokens {

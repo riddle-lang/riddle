@@ -6,6 +6,29 @@ use crate::{
 };
 
 #[test]
+fn set_source_reuses_the_parse_when_the_text_is_unchanged() {
+    let mut parser = IncrementalParser::new();
+    let source = "fun main() { let value = 1; }\n";
+    let first = parser.set_source(source).green.clone();
+    let second = parser.set_source(source).green.clone();
+
+    // The language server hands the same bundled source (user code plus the
+    // standard library) to this every time it checks a document, so a reparse
+    // here is the dominant cost of a keystroke.
+    assert!(
+        second == first,
+        "parsing identical text must reuse the previous green tree"
+    );
+
+    // An actual edit must still produce a new tree.
+    let edited = parser
+        .set_source("fun main() { let value = 2; }\n")
+        .green
+        .clone();
+    assert!(edited != first, "a changed source must be parsed again");
+}
+
+#[test]
 fn incremental_impl_method_body_rebuilds_resolution() {
     let mut parser = IncrementalParser::new();
     parser.set_source(

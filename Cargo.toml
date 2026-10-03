@@ -145,3 +145,10 @@ path = "tests/type_checker/main.rs"
 name = "interpreter"
 path = "benches/interpreter.rs"
 harness = false
+
+[[bench]]
+# Measures editor latency: one keystroke's worth of completion over a real
+# Clue project, plus the analysis it triggers.
+name = "lsp_completion"
+path = "benches/lsp_completion.rs"
+harness = false

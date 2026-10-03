@@ -354,7 +354,10 @@ pub fn prepare_rename_for_document_cancellable<S: BuildHasher>(
     else {
         return Ok(None);
     };
-    Ok(prepare_rename_from_analysis(document, &analysis, position))
+    // A rejection other than "nothing here" is reported as "nothing here":
+    // `prepareRename` has no error channel beyond `null`, and the client will
+    // learn the reason from `rename` if the user tries anyway.
+    Ok(prepare_rename_from_analysis(document, &analysis, position).unwrap_or(None))
 }
 
 /// Renames a symbol at a position in an open document.
@@ -370,7 +373,7 @@ pub fn rename_for_document<S: BuildHasher>(
     new_name: &str,
     options: CompileOptions,
     sessions: &AnalysisSessions,
-) -> Result<Option<WorkspaceEdit>, String> {
+) -> Result<Option<WorkspaceEdit>, RenameError> {
     rename_for_document_cancellable(uri, docs, position, new_name, options, sessions, &|| false)
 }
 
@@ -382,11 +385,11 @@ pub fn rename_for_document_cancellable<S: BuildHasher>(
     options: CompileOptions,
     sessions: &AnalysisSessions,
     cancelled: &impl Fn() -> bool,
-) -> Result<Option<WorkspaceEdit>, String> {
-    validate_identifier(new_name)?;
+) -> Result<Option<WorkspaceEdit>, RenameError> {
+    validate_identifier(new_name).map_err(RenameError::InvalidName)?;
     let document = docs
         .get(uri)
-        .ok_or_else(|| "document is not open".to_string())?;
+        .ok_or_else(|| RenameError::Unavailable("document is not open".into()))?;
     let Some(analysis) = analyze_document_cancellable(
         uri,
         docs,
@@ -394,13 +397,14 @@ pub fn rename_for_document_cancellable<S: BuildHasher>(
         sessions,
         AnalysisDepth::Infer,
         cancelled,
-    )?
+    )
+    .map_err(RenameError::Unavailable)?
     else {
         return Ok(None);
     };
-    Ok(rename_from_analysis(
+    Ok(Some(rename_from_analysis(
         uri, docs, document, &analysis, position, new_name,
-    ))
+    )?))
 }
 
 #[cfg(feature = "test")]
@@ -410,10 +414,7 @@ pub fn hover_for_source(
     position: Position,
     options: CompileOptions,
 ) -> Option<Hover> {
-    let document = Document {
-        text: source.into(),
-        version: Some(1),
-    };
+    let document = Document::new(source, Some(1));
     let analysis = standalone_analysis(source, options);
     hover_from_analysis(&document, &analysis, position)
 }
@@ -431,10 +432,7 @@ pub fn definition_for_source(
     options: CompileOptions,
 ) -> Option<GotoDefinitionResponse> {
     let uri = lsp_types::Url::parse("file:///riddle-navigation.rid").unwrap();
-    let document = Document {
-        text: source.into(),
-        version: Some(1),
-    };
+    let document = Document::new(source, Some(1));
     let analysis = standalone_analysis(source, options);
     definition_from_analysis(&uri, &document, &analysis, position)
 }
@@ -452,10 +450,7 @@ pub fn type_definition_for_source(
     options: CompileOptions,
 ) -> Option<GotoDefinitionResponse> {
     let uri = lsp_types::Url::parse("file:///riddle-navigation.rid").unwrap();
-    let document = Document {
-        text: source.into(),
-        version: Some(1),
-    };
+    let document = Document::new(source, Some(1));
     let analysis = standalone_analysis(source, options);
     type_definition_from_analysis(&uri, &document, &analysis, position)
 }
@@ -473,10 +468,7 @@ pub fn implementation_for_source(
     options: CompileOptions,
 ) -> Option<GotoDefinitionResponse> {
     let uri = lsp_types::Url::parse("file:///riddle-navigation.rid").unwrap();
-    let document = Document {
-        text: source.into(),
-        version: Some(1),
-    };
+    let document = Document::new(source, Some(1));
     let analysis = standalone_analysis(source, options);
     implementation_from_analysis(&uri, &document, &analysis, position)
 }
@@ -495,10 +487,7 @@ pub fn references_for_source(
     options: CompileOptions,
 ) -> Option<Vec<Location>> {
     let uri = lsp_types::Url::parse("file:///riddle-navigation.rid").unwrap();
-    let document = Document {
-        text: source.into(),
-        version: Some(1),
-    };
+    let document = Document::new(source, Some(1));
     let analysis = standalone_analysis(source, options);
     references_from_analysis(&uri, &document, &analysis, position, include_declaration)
 }
@@ -510,12 +499,9 @@ pub fn prepare_rename_for_source(
     position: Position,
     options: CompileOptions,
 ) -> Option<PrepareRenameResponse> {
-    let document = Document {
-        text: source.into(),
-        version: Some(1),
-    };
+    let document = Document::new(source, Some(1));
     let analysis = standalone_analysis(source, options);
-    prepare_rename_from_analysis(&document, &analysis, position)
+    prepare_rename_from_analysis(&document, &analysis, position).unwrap_or(None)
 }
 
 #[cfg(feature = "test")]
@@ -533,18 +519,15 @@ pub fn rename_for_source(
     position: Position,
     new_name: &str,
     options: CompileOptions,
-) -> Result<Option<WorkspaceEdit>, String> {
-    validate_identifier(new_name)?;
+) -> Result<Option<WorkspaceEdit>, RenameError> {
+    validate_identifier(new_name).map_err(RenameError::InvalidName)?;
     let uri = lsp_types::Url::parse("file:///riddle-navigation.rid").unwrap();
-    let document = Document {
-        text: source.into(),
-        version: Some(1),
-    };
+    let document = Document::new(source, Some(1));
     let docs = HashMap::from([(uri.clone(), document.clone())]);
     let analysis = standalone_analysis(source, options);
-    Ok(rename_from_analysis(
+    Ok(Some(rename_from_analysis(
         &uri, &docs, &document, &analysis, position, new_name,
-    ))
+    )?))
 }
 
 #[cfg(feature = "test")]
@@ -1105,32 +1088,136 @@ fn references_from_analysis(
     Some(locations)
 }
 
-fn prepare_rename_from_analysis(
+/// Why a rename could not be produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameError {
+    /// The requested new name is not a legal identifier.
+    InvalidName(String),
+    /// The target exists but cannot be renamed.
+    Rejected(RenameRejection),
+    /// The document or its analysis was unavailable.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for RenameError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(message) | Self::Unavailable(message) => formatter.write_str(message),
+            Self::Rejected(rejection) => write!(formatter, "{rejection}"),
+        }
+    }
+}
+
+impl From<RenameRejection> for RenameError {
+    fn from(rejection: RenameRejection) -> Self {
+        Self::Rejected(rejection)
+    }
+}
+
+/// Why a position cannot be renamed.
+///
+/// `prepareRename` and `rename` share this so a target one accepts can never be
+/// silently refused by the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameRejection {
+    /// Nothing nameable sits under the cursor.
+    NoTarget,
+    /// The position names something the project does not own, such as a
+    /// standard-library item reached through a source map.
+    NotOwned,
+    /// A procedural-macro invocation with no import binding to rename.
+    UnboundMacro,
+}
+
+impl std::fmt::Display for RenameRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NoTarget => "there is nothing to rename at this position",
+            Self::NotOwned => "this item is not defined in the project and cannot be renamed",
+            Self::UnboundMacro => "this macro invocation has no import to rename",
+        })
+    }
+}
+
+/// What the cursor is on, resolved once for both rename entry points.
+enum RenameTarget<'a> {
+    Macro(&'a riddlec::proc_macro::ProcMacroOccurrence),
+    Symbol {
+        /// The identifier under the cursor, which is what the client replaces.
+        origin: rowan::TextRange,
+        /// The declaration the occurrence resolves to.
+        definition: rowan::TextRange,
+    },
+}
+
+fn rename_target<'a>(
+    document: &Document,
+    analysis: &'a DocumentAnalysis,
+    position: Position,
+) -> Result<RenameTarget<'a>, RenameRejection> {
+    if let Some(occurrence) = macro_at(&document.text, analysis, position) {
+        return if occurrence.binding.is_some()
+            && analysis.local_macro_range(&occurrence.range).is_some()
+        {
+            Ok(RenameTarget::Macro(occurrence))
+        } else {
+            Err(RenameRejection::UnboundMacro)
+        };
+    }
+    let Some(symbol) = symbol_at(&document.text, analysis, position) else {
+        return Err(RenameRejection::NoTarget);
+    };
+    let Some(definition) = symbol.definition else {
+        return Err(RenameRejection::NoTarget);
+    };
+    if renamable_target(analysis, definition).is_none() {
+        return Err(RenameRejection::NotOwned);
+    }
+    Ok(RenameTarget::Symbol {
+        origin: symbol.origin,
+        definition,
+    })
+}
+
+pub fn prepare_rename_from_analysis(
     document: &Document,
     analysis: &DocumentAnalysis,
     position: Position,
-) -> Option<PrepareRenameResponse> {
-    if let Some(occurrence) = macro_at(&document.text, analysis, position) {
-        occurrence.binding.as_ref()?;
-        let origin = analysis.local_macro_range(&occurrence.range)?;
-        let placeholder = document
-            .text
-            .get(usize::from(origin.start())..usize::from(origin.end()))?;
-        return Some(PrepareRenameResponse::RangeWithPlaceholder {
-            range: LineIndex::new(&document.text).range(&document.text, origin)?,
-            placeholder: placeholder.into(),
-        });
+) -> Result<Option<PrepareRenameResponse>, RenameRejection> {
+    match rename_target(document, analysis, position) {
+        Ok(RenameTarget::Macro(occurrence)) => {
+            let origin = analysis
+                .local_macro_range(&occurrence.range)
+                .ok_or(RenameRejection::UnboundMacro)?;
+            let placeholder = document
+                .text
+                .get(usize::from(origin.start())..usize::from(origin.end()))
+                .ok_or(RenameRejection::NoTarget)?;
+            Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                range: LineIndex::new(&document.text)
+                    .range(&document.text, origin)
+                    .ok_or(RenameRejection::NoTarget)?,
+                placeholder: placeholder.into(),
+            }))
+        }
+        Ok(RenameTarget::Symbol { origin, .. }) => {
+            let placeholder = document
+                .text
+                .get(usize::from(origin.start())..usize::from(origin.end()))
+                .ok_or(RenameRejection::NoTarget)?;
+            Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                range: LineIndex::new(&document.text)
+                    .range(&document.text, origin)
+                    .ok_or(RenameRejection::NoTarget)?,
+                placeholder: placeholder.into(),
+            }))
+        }
+        // "Nothing to rename here" is not an error for `prepareRename`: the
+        // specification defines `null` as the answer and clients use it to
+        // disable the rename affordance.
+        Err(RenameRejection::NoTarget) => Ok(None),
+        Err(rejection) => Err(rejection),
     }
-    let symbol = symbol_at(&document.text, analysis, position)?;
-    let target = symbol.definition?;
-    renamable_target(analysis, target)?;
-    let placeholder = document
-        .text
-        .get(usize::from(symbol.origin.start())..usize::from(symbol.origin.end()))?;
-    Some(PrepareRenameResponse::RangeWithPlaceholder {
-        range: LineIndex::new(&document.text).range(&document.text, symbol.origin)?,
-        placeholder: placeholder.into(),
-    })
 }
 
 fn rename_from_analysis<S: BuildHasher>(
@@ -1140,44 +1227,46 @@ fn rename_from_analysis<S: BuildHasher>(
     analysis: &DocumentAnalysis,
     position: Position,
     new_name: &str,
-) -> Option<WorkspaceEdit> {
-    if let Some(target) = macro_at(&document.text, analysis, position) {
-        target.binding.as_ref()?;
-        let mut documents = BTreeMap::<String, (lsp_types::Url, Vec<TextEdit>)>::new();
-        for occurrence in analysis
-            .macro_occurrences
-            .iter()
-            .filter(|occurrence| same_macro_binding(target, occurrence))
-        {
-            let location = macro_occurrence_location(uri, analysis, occurrence)?;
-            documents
-                .entry(location.uri.as_str().into())
-                .or_insert_with(|| (location.uri.clone(), Vec::new()))
-                .1
-                .push(TextEdit::new(location.range, new_name.into()));
-        }
-        return Some(workspace_edit(documents, docs));
-    }
-    let target = symbol_at(&document.text, analysis, position)?.definition?;
-    renamable_target(analysis, target)?;
+) -> Result<WorkspaceEdit, RenameRejection> {
     let mut documents = BTreeMap::<String, (lsp_types::Url, Vec<TextEdit>)>::new();
-    for occurrence in symbol_occurrences(analysis, target) {
-        let location = location_for_range(uri, analysis, occurrence.range)?;
-        let replacement = match occurrence.shorthand {
-            Some(shorthand) if shorthand.definition == target => {
-                format!("{new_name}: {}", shorthand.name)
+    match rename_target(document, analysis, position)? {
+        RenameTarget::Macro(target) => {
+            for occurrence in analysis
+                .macro_occurrences
+                .iter()
+                .filter(|occurrence| same_macro_binding(target, occurrence))
+            {
+                let Some(location) = macro_occurrence_location(uri, analysis, occurrence) else {
+                    continue;
+                };
+                documents
+                    .entry(location.uri.as_str().into())
+                    .or_insert_with(|| (location.uri.clone(), Vec::new()))
+                    .1
+                    .push(TextEdit::new(location.range, new_name.into()));
             }
-            Some(shorthand) => format!("{}: {new_name}", shorthand.name),
-            None => new_name.into(),
-        };
-        documents
-            .entry(location.uri.as_str().into())
-            .or_insert_with(|| (location.uri.clone(), Vec::new()))
-            .1
-            .push(TextEdit::new(location.range, replacement));
+        }
+        RenameTarget::Symbol { definition, .. } => {
+            for occurrence in symbol_occurrences(analysis, definition) {
+                let Some(location) = location_for_range(uri, analysis, occurrence.range) else {
+                    continue;
+                };
+                let replacement = match occurrence.shorthand {
+                    Some(shorthand) if shorthand.definition == definition => {
+                        format!("{new_name}: {}", shorthand.name)
+                    }
+                    Some(shorthand) => format!("{}: {new_name}", shorthand.name),
+                    None => new_name.into(),
+                };
+                documents
+                    .entry(location.uri.as_str().into())
+                    .or_insert_with(|| (location.uri.clone(), Vec::new()))
+                    .1
+                    .push(TextEdit::new(location.range, replacement));
+            }
+        }
     }
-
-    Some(workspace_edit(documents, docs))
+    Ok(workspace_edit(documents, docs))
 }
 
 fn workspace_edit<S: BuildHasher>(

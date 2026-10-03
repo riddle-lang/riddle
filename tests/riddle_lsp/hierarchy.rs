@@ -41,10 +41,13 @@ fn trait_call_targets_trait_method_declaration() {
         .unwrap();
 
     assert_eq!(target.name, "draw");
+    // `key` covers the whole declaration while the identifier is remembered
+    // separately, so "where the symbol is" is the name range.
     assert_eq!(
-        target.key.start,
+        target.name_source_range.start,
         u32::try_from(source.find("draw").unwrap()).unwrap()
     );
+    assert!(target.key.start < target.name_source_range.start);
     assert_eq!(edge.sites.len(), 1);
     let _ = fs::remove_dir_all(root);
 }

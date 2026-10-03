@@ -1,5 +1,6 @@
 mod code_actions;
 mod completion;
+mod completion_hang;
 mod diagnostics;
 mod editing;
 mod editor_features;
@@ -20,11 +21,11 @@ use lsp_types::{
 use riddle_lsp::{
     parse_args,
     test_support::{
-        AnalysisSessions, DiagnosticSessions, Document, MOD_DECLARATION, MOD_DEFAULT_LIBRARY,
-        MOD_MUTABLE, MOD_STATIC, ProjectIndex, RequestRevisions, TOKEN_COMMENT, TOKEN_ENUM,
-        TOKEN_FUNCTION, TOKEN_INTERFACE, TOKEN_KEYWORD, TOKEN_MACRO, TOKEN_METHOD, TOKEN_PARAMETER,
-        TOKEN_STRING, TOKEN_STRUCT, TOKEN_TYPE, TOKEN_VARIABLE, WorkspaceState,
-        apply_content_changes, collect_diagnostics, collect_document_diagnostics,
+        AnalysisSessions, ApplyError, DiagnosticSessions, Document, MOD_DECLARATION,
+        MOD_DEFAULT_LIBRARY, MOD_MUTABLE, MOD_STATIC, ProjectIndex, RequestRevisions,
+        TOKEN_COMMENT, TOKEN_ENUM, TOKEN_FUNCTION, TOKEN_INTERFACE, TOKEN_KEYWORD, TOKEN_MACRO,
+        TOKEN_METHOD, TOKEN_PARAMETER, TOKEN_STRING, TOKEN_STRUCT, TOKEN_TYPE, TOKEN_VARIABLE,
+        WorkspaceState, apply_content_changes, collect_diagnostics, collect_document_diagnostics,
         collect_workspace_diagnostics, collect_workspace_diagnostics_cancellable,
         collect_workspace_diagnostics_with_sessions, completion_items_for_document,
         completion_items_for_source, definition_for_document, definition_for_source,
@@ -33,11 +34,11 @@ use riddle_lsp::{
         hover_for_document, hover_for_document_cancellable, hover_for_source,
         implementation_for_source, inlay_hints_for_document, inlay_hints_for_source,
         manifest_completions, manifest_diagnostics, manifest_document_symbols, manifest_hover,
-        offset_for_position, organize_imports_for_source, prepare_rename_for_document,
-        prepare_rename_for_source, project_index_for_document, project_index_for_root, quick_fixes,
-        quick_fixes_for_source, references_for_document, references_for_source,
-        rename_for_document, rename_for_source, selection_ranges_for_source, semantic_token_delta,
-        semantic_tokens_for_document, semantic_tokens_for_source,
+        offset_for_position, offset_for_position_clamped, organize_imports_for_source,
+        prepare_rename_for_document, prepare_rename_for_source, project_index_for_document,
+        project_index_for_root, quick_fixes, quick_fixes_for_source, references_for_document,
+        references_for_source, rename_for_document, rename_for_source, selection_ranges_for_source,
+        semantic_token_delta, semantic_tokens_for_document, semantic_tokens_for_source,
         semantic_tokens_for_source_with_options, signature_help_for_source, to_lsp, to_lsp_mapped,
         type_definition_for_source, workspace_symbols_for_index, workspace_symbols_for_source,
     },

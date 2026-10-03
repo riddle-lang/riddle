@@ -21,6 +21,14 @@ mod workspace;
 
 pub use cli::{Options, parse_args};
 
+/// Turns per-phase latency tracing on or off.
+///
+/// Enabled by `--trace-latency` (or `RIDDLE_LSP_TRACE_LATENCY`). With it off,
+/// each phase costs one relaxed atomic load.
+pub fn set_latency_tracing(enabled: bool) {
+    server::set_latency_tracing(enabled);
+}
+
 #[cfg(feature = "test")]
 #[doc(hidden)]
 pub mod test_support {
@@ -62,8 +70,9 @@ pub mod test_support {
     };
     pub use crate::server::{Document, RequestRevisions, documents_for_uri};
     pub use crate::session::AnalysisSessions;
-    pub use crate::text::apply_content_changes;
     pub use crate::text::offset_for_position;
+    pub use crate::text::offset_for_position_clamped;
+    pub use crate::text::{ApplyError, PositionEncoding, apply_content_changes};
     pub use crate::workspace::{WorkspaceState, discover_projects};
 }
 
@@ -71,6 +80,7 @@ use server::Backend;
 use tower_lsp::{LspService, Server};
 
 pub async fn serve(options: Options) {
+    server::set_latency_tracing(options.trace_latency);
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::new(|client| {

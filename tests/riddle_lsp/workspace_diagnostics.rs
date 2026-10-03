@@ -33,13 +33,7 @@ fn project_diagnostics_use_unsaved_module_source() {
     fs::write(&util, "pub fun value() -> i32 { 1 }\n").unwrap();
     let uri = lsp_types::Url::from_file_path(&util).unwrap();
     let text = "pub fun value() -> i32 { missing }\n".to_string();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: text.clone(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(text.clone(), Some(1)))]);
 
     let diagnostics = collect_document_diagnostics(&uri, &text, &docs, CompileOptions::default());
 
@@ -68,13 +62,7 @@ fn project_diagnostics_include_unopened_modules() {
     let util_text = "pub fun value() { missing; }\n";
     fs::write(&util, util_text).unwrap();
     let main_uri = lsp_types::Url::from_file_path(&main).unwrap();
-    let docs = HashMap::from([(
-        main_uri,
-        Document {
-            text: main_text,
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(main_uri, Document::new(main_text, Some(1)))]);
 
     let published = collect_workspace_diagnostics(&docs, CompileOptions::default());
     let util_uri = lsp_types::Url::from_file_path(fs::canonicalize(&util).unwrap()).unwrap();
@@ -113,10 +101,7 @@ fn project_diagnostics_preserve_the_open_document_uri() {
     let opened_uri = lsp_types::Url::from_file_path(&aliased_path).unwrap();
     let docs = HashMap::from([(
         opened_uri.clone(),
-        Document {
-            text: "fun main() { missing; }\n".into(),
-            version: Some(7),
-        },
+        Document::new("fun main() { missing; }\n", Some(7)),
     )]);
 
     let published = collect_workspace_diagnostics(&docs, CompileOptions::default());

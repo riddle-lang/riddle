@@ -328,8 +328,24 @@ fn type_hint(position: lsp_types::Position, label: String) -> InlayHint {
         kind: Some(InlayHintKind::TYPE),
         text_edits: None,
         tooltip: None,
-        padding_left: None,
+        // The label starts with `: `, so it needs a space before it to read as
+        // `value: i32` rather than `value: i32` glued to the identifier.
+        padding_left: Some(true),
         padding_right: None,
+        data: None,
+    }
+}
+
+fn parameter_hint(position: lsp_types::Position, label: String) -> InlayHint {
+    InlayHint {
+        position,
+        label: InlayHintLabel::String(label),
+        kind: Some(InlayHintKind::PARAMETER),
+        text_edits: None,
+        tooltip: None,
+        padding_left: None,
+        // `name: value` needs the trailing space before the argument.
+        padding_right: Some(true),
         data: None,
     }
 }
@@ -363,8 +379,13 @@ fn parameter_hints_from_analysis(
         let Some(parameters) = call_parameter_names_at(document_source, analysis, position) else {
             continue;
         };
-        let arguments = call_arguments(&tokens, index);
-        for (parameter, argument) in parameters.iter().zip(arguments) {
+        let arguments = call_argument_starts(&tokens, index);
+        for (parameter, argument_start) in parameters.iter().zip(arguments) {
+            let Some(argument) = tokens.get(argument_start) else {
+                continue;
+            };
+            // An argument already written as `name` for parameter `name` says
+            // nothing new.
             if argument.kind == SyntaxKind::Ident
                 && &document_source[argument.span.clone()] == parameter
             {
@@ -373,48 +394,43 @@ fn parameter_hints_from_analysis(
             let Some(position) = line_index.position(document_source, argument.span.start) else {
                 continue;
             };
-            hints.push(InlayHint {
-                position,
-                label: InlayHintLabel::String(format!("{parameter}: ")),
-                kind: Some(InlayHintKind::PARAMETER),
-                text_edits: None,
-                tooltip: None,
-                padding_left: None,
-                padding_right: None,
-                data: None,
-            });
+            hints.push(parameter_hint(position, format!("{parameter}: ")));
         }
     }
     hints
 }
 
-fn call_arguments(tokens: &[frontend::lexer::Token], index: usize) -> Vec<&frontend::lexer::Token> {
-    let mut arguments = Vec::new();
-    let mut current = None;
+/// Token indices where each argument of a call starts.
+///
+/// Only the first token of an argument is needed, but the *split* has to be
+/// syntactic: tracking bracket depth means `f(a + b, c)` yields two arguments
+/// rather than treating `a` as the whole first one.
+fn call_argument_starts(tokens: &[frontend::lexer::Token], index: usize) -> Vec<usize> {
+    let mut starts = Vec::new();
     let mut depth = 0usize;
-    for argument in tokens.iter().skip(index + 2) {
-        if argument.kind == SyntaxKind::RParen && depth == 0 {
-            if let Some(argument) = current.take() {
-                arguments.push(argument);
-            }
-            break;
-        }
-        if argument.kind == SyntaxKind::Comma && depth == 0 {
-            if let Some(argument) = current.take() {
-                arguments.push(argument);
-            }
-            continue;
-        }
-        if current.is_none() {
-            current = Some(argument);
-        }
+    let mut expecting_argument = true;
+    for (offset, argument) in tokens.iter().enumerate().skip(index + 2) {
         match argument.kind {
+            SyntaxKind::RParen if depth == 0 => {
+                if !expecting_argument {
+                    starts.push(offset);
+                }
+                break;
+            }
+            SyntaxKind::Comma if depth == 0 => {
+                expecting_argument = true;
+                continue;
+            }
             SyntaxKind::LParen | SyntaxKind::LBracket | SyntaxKind::LBrace => depth += 1,
             SyntaxKind::RParen | SyntaxKind::RBracket | SyntaxKind::RBrace => {
                 depth = depth.saturating_sub(1);
             }
             _ => {}
         }
+        if expecting_argument && depth == 0 {
+            starts.push(offset);
+            expecting_argument = false;
+        }
     }
-    arguments
+    starts
 }

@@ -48,5 +48,16 @@ jobs:
       - name: Check installable binaries
         run: cargo check -p riddle --features install-bins --bins
 
+      # Capability and JSON-shape regressions used to reach the client
+      # unnoticed, because the only protocol-level test ran on a schedule
+      # rather than on the pull request that introduced them.
+      - name: LSP stdio smoke
+        shell: bash
+        run: |
+          cargo build -p riddle --features install-bins --bin riddle-lsp
+          BIN="target/debug/riddle-lsp"
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN="${BIN}.exe"; fi
+          node editors/lsp-smoke.mjs "$BIN"
+
       - name: Run strict Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

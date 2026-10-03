@@ -158,13 +158,7 @@ fn parser_eof_diagnostic_stays_at_user_eof_with_std() {
 fn recursive_type_alias_reports_diagnostic_without_crashing() {
     let source = "type Result = Result;";
     let uri = lsp_types::Url::parse("file:///recursive-type-alias.rid").unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: source.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(source, Some(1)))]);
 
     let diagnostics = collect_document_diagnostics(&uri, source, &docs, CompileOptions::default());
 

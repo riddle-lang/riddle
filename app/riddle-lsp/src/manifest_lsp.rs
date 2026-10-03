@@ -745,13 +745,38 @@ pub fn manifest_completions(source: &str, position: Position) -> Vec<CompletionI
         Some("workspace") => key_completions(WORKSPACE_KEYS, &existing_keys, ""),
         Some("runtime") => key_completions(RUNTIME_KEYS, &existing_keys, ""),
         Some("build") => key_completions(BUILD_KEYS, &existing_keys, ""),
-        // Dependency and feature names are user-chosen; no noise.
-        Some(_) => Vec::new(),
+        Some(section) => nested_section_completions(section, &existing_keys),
     }
+}
+
+/// Keys for sections nested under a table, such as `[dependencies.foo]` or
+/// `[[bin]]`.
+///
+/// The *names* in these sections are user-chosen (`foo` above), but their keys
+/// are not: `path`, `version`, `git` and friends are a fixed schema, and
+/// leaving them out meant the manifest was the one file in the project with no
+/// completions at all.
+fn nested_section_completions(section: &str, existing_keys: &[String]) -> Vec<CompletionItem> {
+    let section = section.trim_matches('"');
+    if section.starts_with("dependencies.") || section.starts_with("dev-dependencies.") {
+        return key_completions(DEPENDENCY_KEYS, existing_keys, "");
+    }
+    for prefix in ["bin", "example", "test", "bench"] {
+        if section == prefix || section.starts_with(&format!("{prefix}.")) {
+            return key_completions(TARGET_KEYS, existing_keys, "");
+        }
+    }
+    // Feature and dependency names themselves are user-chosen; only their
+    // values are completable, and `[features]` keys are plain booleans or lists.
+    Vec::new()
 }
 
 /// The `[section]` header governing the line starting at `line_start`, plus
 /// the keys already present under it.
+///
+/// Nested and array headers are normalised to their dotted name: `[[bin]]`
+/// becomes `bin` and `[dependencies.foo]` becomes `dependencies.foo`, which is
+/// what [`nested_section_completions`] matches on.
 fn enclosing_section(source: &str, line_start: usize) -> (Option<String>, Vec<String>) {
     let mut section = None;
     let mut existing = Vec::new();

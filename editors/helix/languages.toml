@@ -5,7 +5,13 @@ command = "riddle-lsp"
 name = "riddle"
 scope = "source.riddle"
 language-id = "riddle"
-file-types = ["rid"]
+file-types = [
+    { glob = "*.rid" },
+    # The Clue manifest carries the same language server's diagnostics,
+    # completions and hover, so it is served by this entry rather than being
+    # left to Helix's built-in TOML language.
+    { glob = "Clue.toml" },
+]
 roots = ["Clue.toml", ".git"]
 comment-tokens = "//"
 indent = { tab-width = 4, unit = "    " }

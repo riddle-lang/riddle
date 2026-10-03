@@ -67,11 +67,30 @@ impl IncrementalParser {
         }
     }
 
-    /// Full Parsing (First or Backward)
+    /// Parses `source` from scratch, or returns the previous parse when the
+    /// text is unchanged.
+    ///
+    /// The reuse matters more than it looks: the language server calls this
+    /// with the same bundled source (user code plus the whole standard library,
+    /// ~240 KB) on every request, and reparsing it took ~700 ms — the dominant
+    /// cost of a keystroke. Reparsing identical text also invalidates the green
+    /// trees the type checker's body fingerprints are keyed on, so the type
+    /// check that followed could not reuse anything either.
     pub fn set_source(&mut self, source: &str) -> &Parse {
+        // The cached parse is the parse of this exact text — whether it came
+        // from a full parse or an incremental reparse — so there is nothing to
+        // redo. The previous parse is moved out first so the borrow checker can
+        // see that returning it does not alias `self.current`.
+        let previous = self.current.take();
+        if self.source == source
+            && let Some(previous) = previous
+        {
+            return self.current.insert(previous);
+        }
         self.source = source.to_string();
         self.last_reparse = ReparseMode::Full;
-        self.current.insert(parse_full(&self.source))
+        let parsed = parse_full(&self.source);
+        self.current.insert(parsed)
     }
 
     /// Apply editing and redirection

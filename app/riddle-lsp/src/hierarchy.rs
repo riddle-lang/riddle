@@ -61,12 +61,8 @@ pub fn incoming_calls(
         .iter()
         .filter(|edge| edge.target == key)
         .filter_map(|edge| {
-            let symbol = index
-                .symbols
-                .iter()
-                .find(|symbol| symbol.key == edge.caller)?;
             Some(CallHierarchyIncomingCall {
-                from: call_item(symbol),
+                from: call_item(index.symbol_by_key(&edge.caller)?),
                 from_ranges: edge.sites.clone(),
             })
         })
@@ -87,12 +83,8 @@ pub fn outgoing_calls(
         .iter()
         .filter(|edge| edge.caller == key)
         .filter_map(|edge| {
-            let symbol = index
-                .symbols
-                .iter()
-                .find(|symbol| symbol.key == edge.target)?;
             Some(CallHierarchyOutgoingCall {
-                to: call_item(symbol),
+                to: call_item(index.symbol_by_key(&edge.target)?),
                 from_ranges: edge.sites.clone(),
             })
         })
@@ -161,7 +153,7 @@ fn related_types(
     let items = keys
         .into_iter()
         .flatten()
-        .filter_map(|key| index.symbols.iter().find(|symbol| symbol.key == *key))
+        .filter_map(|key| index.symbol_by_key(key))
         .filter_map(|symbol| type_symbol_kind(symbol.key.kind).map(|_| type_item(symbol)))
         .collect();
     Ok(Some(items))
@@ -207,10 +199,7 @@ fn symbol_at_location<'a>(
     index: &'a ProjectIndex,
     location: &Location,
 ) -> Option<&'a IndexedSymbol> {
-    index
-        .symbols
-        .iter()
-        .find(|symbol| symbol.location == *location)
+    index.symbol_at(location)
 }
 
 fn call_item(symbol: &IndexedSymbol) -> CallHierarchyItem {
@@ -221,7 +210,9 @@ fn call_item(symbol: &IndexedSymbol) -> CallHierarchyItem {
         detail: Some(symbol.detail.clone()),
         uri: symbol.location.uri.clone(),
         range: symbol.location.range,
-        selection_range: symbol.location.range,
+        // `selectionRange` is the identifier the feature was invoked on, which
+        // is what the client highlights; `range` is the whole item.
+        selection_range: symbol.selection_range,
         data: Some(serde_json::to_value(&symbol.key).expect("symbol keys serialize")),
     }
 }
@@ -234,7 +225,7 @@ fn type_item(symbol: &IndexedSymbol) -> TypeHierarchyItem {
         detail: Some(symbol.detail.clone()),
         uri: symbol.location.uri.clone(),
         range: symbol.location.range,
-        selection_range: symbol.location.range,
+        selection_range: symbol.selection_range,
         data: Some(serde_json::to_value(&symbol.key).expect("symbol keys serialize")),
     }
 }

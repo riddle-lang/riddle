@@ -293,6 +293,7 @@ pub(crate) fn lower_mod_decl(hir: &mut HirFile, m: &ast::ModDecl) -> ModuleId {
     let mid = hir.item_tree.modules.alloc(HirModule {
         name,
         name_range,
+        extent: trimmed_range(m.syntax()),
         visibility,
         items: None,
         attrs,
@@ -382,6 +383,7 @@ pub(crate) fn lower_impl_decl(hir: &mut HirFile, i: &ast::ImplDecl) -> item_tree
         .collect();
 
     hir.item_tree.impls.alloc(HirImpl {
+        extent: trimmed_range(i.syntax()),
         self_ty,
         self_ty_range,
         trait_ty,

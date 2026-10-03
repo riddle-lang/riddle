@@ -29,7 +29,7 @@ use syntax::SyntaxKind;
 use crate::{
     code_actions::trait_method_signature,
     imports::{import_edit, parse_root},
-    server::Document,
+    server::{Document, Phase, measure},
     session::AnalysisSessions,
     text::{LineIndex, is_identifier_continue, offset_for_position, text_range, text_size},
 };
@@ -102,7 +102,6 @@ pub fn completion_items_for_document<S: BuildHasher>(
     position: lsp_types::Position,
     compile_options: CompileOptions,
     sessions: &AnalysisSessions,
-    fallback_sessions: &AnalysisSessions,
     cancelled: impl Fn() -> bool,
 ) -> std::result::Result<Option<Vec<CompletionItem>>, String> {
     if cancelled() {
@@ -111,17 +110,24 @@ pub fn completion_items_for_document<S: BuildHasher>(
     let document = docs
         .get(uri)
         .ok_or_else(|| "document is not open".to_string())?;
+    let _site_phase = Phase::start("completion.site");
     let site = completion_site(&document.text, position)
         .ok_or_else(|| "completion position is outside the document".to_string())?;
     let mut marked = marked_completion_source(&document.text, &site);
+    drop(_site_phase);
 
     if let Some((path, mut overlays)) = project_completion_overlays(uri, docs, &marked)
         && let Some(root) = clue::find_project_root(&path)
     {
         let session = sessions.project(&root);
-        let mut session = session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Waiting for the project session is invisible to the phase timings
+        // that follow, and it is where a completion lands whenever the
+        // diagnostics pass holds the same session.
+        let mut session = measure("completion.session_lock_wait", || {
+            session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         if cancelled() {
             return Ok(None);
         }
@@ -144,13 +150,19 @@ pub fn completion_items_for_document<S: BuildHasher>(
                 )
             }
         };
-        let Some(mut analysis) = analyze(&overlays).map_err(|error| error.to_string())? else {
+        let Some(mut analysis) = measure("completion.primary_analysis", || {
+            analyze(&overlays).map_err(|error| error.to_string())
+        })?
+        else {
             return Ok(None);
         };
         if analysis.result.hir.is_none() && completion_needs_semicolon(&marked, &site) {
             marked.insert(site.start + COMPLETION_MARKER.len(), ';');
             overlays.insert(path.clone(), marked.clone());
-            let Some(recovered) = analyze(&overlays).map_err(|error| error.to_string())? else {
+            let Some(recovered) = measure("completion.recovery_analysis", || {
+                analyze(&overlays).map_err(|error| error.to_string())
+            })?
+            else {
                 return Ok(None);
             };
             analysis = recovered;
@@ -160,8 +172,7 @@ pub fn completion_items_for_document<S: BuildHasher>(
         }
         // If the marker wasn't resolved as a scope-graph reference (e.g. the
         // cursor is at the start of a fresh statement), re-analyse the original
-        // source to recover global-scope completions.  Use `fallback_sessions`
-        // so the two IncrementalParsers never thrash each other's cache.
+        // source to recover global-scope completions.
         let fallback_result = if matches!(
             site.context,
             CompletionContext::General | CompletionContext::Type
@@ -172,49 +183,52 @@ pub fn completion_items_for_document<S: BuildHasher>(
             .zip(analysis.result.scope_graph.as_ref())
             .is_some_and(|(_, graph)| completion_marker_reference(graph).is_none())
         {
-            let fb_session = fallback_sessions.project(&root);
-            let mut fb_session = fb_session
+            // The fallback runs in the same session as the analysis above, so
+            // the session lock has to be released first: a second `lock()` on a
+            // guard still held here waits on itself and never returns. Reusing
+            // one session is safe because analyses are cached by input
+            // fingerprint, so alternating sources do not evict each other.
+            drop(session);
+            let session = sessions.project(&root);
+            let mut fb_session = session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Restore the original (non-marked) overlay so the fallback
-            // session sees the unmodified source.
+            // Restore the original (non-marked) overlay so the fallback sees
+            // the unmodified source.
             let mut fb_overlays = overlays.clone();
             fb_overlays.insert(path.clone(), document.text.clone());
-            clue::resolve_project_with_session_cancellable(
-                &root,
-                &fb_overlays,
-                compile_options,
-                &mut fb_session,
-                &cancelled,
-            )
-            .ok()
-            .flatten()
+            measure("completion.fallback_analysis", || {
+                clue::resolve_project_with_session_cancellable(
+                    &root,
+                    &fb_overlays,
+                    compile_options,
+                    &mut fb_session,
+                    &cancelled,
+                )
+                .ok()
+                .flatten()
+            })
         } else {
             None
         };
         if cancelled() {
             return Ok(None);
         }
-        let mut items = project_completion_items(
-            &analysis,
-            &path,
-            &document.text,
-            &site,
-            fallback_result.as_ref(),
-        );
+        let mut items = measure("completion.collect", || {
+            project_completion_items(
+                &analysis,
+                &path,
+                &document.text,
+                &site,
+                fallback_result.as_ref(),
+            )
+        });
         attach_completion_edits(&document.text, &site, &mut items);
         return Ok(Some(items));
     }
 
-    let mut items = standalone_completion_items(
-        uri,
-        document,
-        &site,
-        compile_options,
-        sessions,
-        fallback_sessions,
-        &cancelled,
-    );
+    let mut items =
+        standalone_completion_items(uri, document, &site, compile_options, sessions, &cancelled);
     if let Some(items) = &mut items {
         attach_completion_edits(&document.text, &site, items);
     }
@@ -265,7 +279,6 @@ fn standalone_completion_items(
     site: &CompletionSite,
     compile_options: CompileOptions,
     sessions: &AnalysisSessions,
-    fallback_sessions: &AnalysisSessions,
     cancelled: &impl Fn() -> bool,
 ) -> Option<Vec<CompletionItem>> {
     let mut marked = marked_completion_source(&document.text, site);
@@ -296,8 +309,9 @@ fn standalone_completion_items(
     }
     // Fallback: if the marker wasn't resolved as a reference in the scope graph
     // (e.g. typing at the start of a statement), re-analyse the original source
-    // so that global definitions are still offered.  Use `fallback_sessions` so
-    // the two IncrementalParsers never thrash each other's cache.
+    // so that global definitions are still offered. The session lock is dropped
+    // first and re-taken for the second pass: locking the guard held above again
+    // waits on itself forever.
     let fallback_result = if matches!(
         site.context,
         CompletionContext::General | CompletionContext::Type
@@ -307,11 +321,12 @@ fn standalone_completion_items(
         .zip(result.scope_graph.as_ref())
         .is_some_and(|(_, graph)| completion_marker_reference(graph).is_none())
     {
-        let fb_session = fallback_sessions.standalone(uri);
-        let mut fb_session = fb_session
+        drop(session);
+        let fallback = sessions.standalone(uri);
+        let mut fallback = fallback
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        fb_session.resolve_with_options_cancellable(&document.text, compile_options, cancelled)
+        fallback.resolve_with_options_cancellable(&document.text, compile_options, cancelled)
     } else {
         None
     };
@@ -901,6 +916,11 @@ fn marked_completion_source(source: &str, site: &CompletionSite) -> String {
     marked
 }
 
+/// Whether appending a semicolon could make the marked source parse.
+///
+/// The recovery pass re-analyses the whole project, so its guard has to be
+/// exact: a `false` here silently loses every completion item at a statement
+/// end, because the recovery analysis is what produces a usable HIR.
 fn completion_needs_semicolon(marked: &str, site: &CompletionSite) -> bool {
     !marked[site.start + COMPLETION_MARKER.len()..]
         .trim_start()

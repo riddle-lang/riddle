@@ -1,5 +1,42 @@
 use super::*;
 
+/// The incremental type checker only pays for itself if the session that owns
+/// it survives between edits. A standalone document analysed twice through the
+/// same session must go through one session, not two — a fresh session re-checks
+/// all ~827 standard-library bodies (measured at ~700 ms in a release build).
+#[test]
+fn standalone_analyses_reuse_the_incremental_checker_across_runs() {
+    let uri = lsp_types::Url::parse("untitled:riddle-incremental-reuse.rid").unwrap();
+    let mut sessions = DiagnosticSessions::default();
+
+    let first = collect_workspace_diagnostics_with_sessions(
+        &HashMap::from([(
+            uri.clone(),
+            Document::new("fun main() { let value = 1; }\n", Some(1)),
+        )]),
+        CompileOptions::default(),
+        &mut sessions,
+    );
+    assert_eq!(first.len(), 1);
+    assert_eq!(sessions.standalone_checks(&uri), Some(1));
+
+    let second = collect_workspace_diagnostics_with_sessions(
+        &HashMap::from([(
+            uri.clone(),
+            Document::new("fun main() { let value = 2; }\n", Some(2)),
+        )]),
+        CompileOptions::default(),
+        &mut sessions,
+    );
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        sessions.standalone_checks(&uri),
+        Some(2),
+        "the second analysis must run in the same session, keeping the \
+         standard library's incremental type check"
+    );
+}
+
 fn write_workspace_project(root: &std::path::Path, name: &str) {
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
@@ -92,19 +129,10 @@ fn project_diagnostics_follow_peer_overlay_removal() {
     let main_uri = lsp_types::Url::from_file_path(&main).unwrap();
     let util_uri = lsp_types::Url::from_file_path(&util).unwrap();
     let mut docs = HashMap::from([
-        (
-            main_uri.clone(),
-            Document {
-                text: main_text,
-                version: Some(1),
-            },
-        ),
+        (main_uri.clone(), Document::new(main_text, Some(1))),
         (
             util_uri.clone(),
-            Document {
-                text: "pub fun other() -> i32 { 1 }\n".into(),
-                version: Some(1),
-            },
+            Document::new("pub fun other() -> i32 { 1 }\n", Some(1)),
         ),
     ]);
 
@@ -164,17 +192,11 @@ fn workspace_analysis_can_be_cancelled_between_documents() {
     let docs = HashMap::from([
         (
             lsp_types::Url::parse("untitled:first.rid").unwrap(),
-            Document {
-                text: "fun first() {}".into(),
-                version: Some(1),
-            },
+            Document::new("fun first() {}", Some(1)),
         ),
         (
             lsp_types::Url::parse("untitled:second.rid").unwrap(),
-            Document {
-                text: "fun second() {}".into(),
-                version: Some(1),
-            },
+            Document::new("fun second() {}", Some(1)),
         ),
     ]);
     let polls = Cell::new(0);
@@ -197,13 +219,7 @@ fn workspace_analysis_can_be_cancelled_between_documents() {
 fn document_analysis_can_be_cancelled_before_work_starts() {
     let uri = lsp_types::Url::parse("untitled:cancelled.rid").unwrap();
     let source = "fun value() -> i32 { 1 }";
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: source.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(source, Some(1)))]);
 
     let hover = hover_for_document_cancellable(
         &uri,
@@ -233,13 +249,7 @@ fn workspace_sessions_observe_project_disk_edits() {
     let util_path = root.join("src/util.rid");
     fs::write(&util_path, "pub fun value() {}\n").unwrap();
     let main_uri = lsp_types::Url::from_file_path(fs::canonicalize(&main_path).unwrap()).unwrap();
-    let docs = HashMap::from([(
-        main_uri,
-        Document {
-            text: main_source.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(main_uri, Document::new(main_source, Some(1)))]);
     let mut sessions = DiagnosticSessions::default();
 
     collect_workspace_diagnostics_with_sessions(&docs, CompileOptions::default(), &mut sessions);

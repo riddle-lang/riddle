@@ -336,6 +336,7 @@ impl AstLower for FuncDecl {
         arena.alloc(HirFunction {
             name,
             name_range,
+            extent: range,
             visibility,
             is_unsafe,
             generics,
@@ -384,6 +385,7 @@ impl AstLower for StructDecl {
             name,
             visibility,
             name_range,
+            extent: trimmed_range(self.syntax()),
             generics,
             const_generics,
             generic_bounds,
@@ -413,6 +415,7 @@ impl AstLower for ast::EnumDecl {
         arena.alloc(HirEnum {
             name,
             name_range,
+            extent: range,
             visibility,
             generics,
             const_generics,
@@ -491,6 +494,7 @@ impl AstLower for ast::TraitDecl {
         arena.alloc(HirTrait {
             name,
             name_range,
+            extent: trimmed_range(self.syntax()),
             visibility,
             generics,
             generic_defaults,
@@ -576,6 +580,7 @@ fn lower_trait_method(method: &ast::FuncDecl) -> HirFunction {
     HirFunction {
         name,
         name_range: method_name_range,
+        extent: trimmed_range(method.syntax()),
         visibility: lower_visibility(method.is_pub()),
         is_unsafe: method.is_unsafe(),
         generics: lower_generic_params(generic_params.clone()),
@@ -599,6 +604,7 @@ fn lower_trait_type_alias(alias: &ast::TypeAliasDecl) -> HirTypeAlias {
     let ty_ast = alias.ty();
     let ty_range = ty_ast.as_ref().map(|ty| trimmed_range(ty.syntax()));
     HirTypeAlias {
+        extent: range,
         name: lower_name(name_token),
         name_range,
         visibility: lower_visibility(alias.is_pub()),
@@ -644,6 +650,7 @@ impl AstLower for ast::ConstDecl {
         arena.alloc(HirConst {
             name,
             name_range,
+            extent: range,
             visibility,
             ty,
             ty_range,
@@ -671,6 +678,7 @@ impl AstLower for ast::TypeAliasDecl {
         arena.alloc(HirTypeAlias {
             name,
             name_range,
+            extent: range,
             visibility,
             ty,
             ty_range,

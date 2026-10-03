@@ -558,20 +558,13 @@ fn completion_hides_standard_panic_runtime_auto_imports() {
     let main_text = "fun main() { pan }\n";
     fs::write(&main, main_text).unwrap();
     let uri = lsp_types::Url::from_file_path(&main).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: main_text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(main_text, Some(1)))]);
 
     let items = completion_items_for_document(
         &uri,
         &docs,
         position(main_text, main_text.find("pan }").unwrap() + 3),
         CompileOptions::default(),
-        &AnalysisSessions::default(),
         &AnalysisSessions::default(),
         || false,
     )
@@ -702,23 +695,15 @@ fn completion_loads_unopened_project_modules() {
     fs::write(&main, main_text).unwrap();
     fs::write(root.join("src/util.rid"), "pub fun value() {}\n").unwrap();
     let uri = lsp_types::Url::from_file_path(&main).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: main_text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(main_text, Some(1)))]);
     let sessions = AnalysisSessions::default();
 
-    let fallback_sessions = AnalysisSessions::default();
     let items = completion_items_for_document(
         &uri,
         &docs,
         position(main_text, main_text.find("va }").unwrap() + 2),
         CompileOptions::default(),
         &sessions,
-        &fallback_sessions,
         || false,
     )
     .unwrap()
@@ -741,20 +726,13 @@ fn completion_auto_imports_public_symbol_with_bare_insertion() {
     let main_text = "mod geometry { pub struct Point {} }\nfun main() { let point: Poi }\n";
     fs::write(&main, main_text).unwrap();
     let uri = lsp_types::Url::from_file_path(&main).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: main_text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(main_text, Some(1)))]);
 
     let items = completion_items_for_document(
         &uri,
         &docs,
         position(main_text, main_text.find("Poi }").unwrap() + 3),
         CompileOptions { use_std: false },
-        &AnalysisSessions::default(),
         &AnalysisSessions::default(),
         || false,
     )
@@ -800,20 +778,13 @@ fn completion_keeps_same_named_auto_imports_separate_and_hides_private_items() {
     let main_text = "mod a { pub struct Point {} struct Private {} }\nmod b { pub struct Point {} }\nfun main() { let point: P }\n";
     fs::write(&main, main_text).unwrap();
     let uri = lsp_types::Url::from_file_path(&main).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: main_text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(main_text, Some(1)))]);
 
     let items = completion_items_for_document(
         &uri,
         &docs,
         position(main_text, main_text.find("P }").unwrap() + 1),
         CompileOptions { use_std: false },
-        &AnalysisSessions::default(),
         &AnalysisSessions::default(),
         || false,
     )
@@ -847,20 +818,8 @@ fn completion_uses_unsaved_project_module_overlays() {
     let main_uri = lsp_types::Url::from_file_path(&main).unwrap();
     let util_uri = lsp_types::Url::from_file_path(&util).unwrap();
     let docs = HashMap::from([
-        (
-            main_uri.clone(),
-            Document {
-                text: main_text.into(),
-                version: Some(1),
-            },
-        ),
-        (
-            util_uri,
-            Document {
-                text: "pub fun fresh() {}\n".into(),
-                version: Some(2),
-            },
-        ),
+        (main_uri.clone(), Document::new(main_text, Some(1))),
+        (util_uri, Document::new("pub fun fresh() {}\n", Some(2))),
     ]);
     let sessions = AnalysisSessions::default();
 
@@ -870,7 +829,6 @@ fn completion_uses_unsaved_project_module_overlays() {
         position(main_text, main_text.find("fr }").unwrap() + 2),
         CompileOptions::default(),
         &sessions,
-        &AnalysisSessions::default(),
         || false,
     )
     .unwrap()
@@ -907,13 +865,7 @@ fn project_member_completion_uses_active_module_coordinates() {
     let model_text = "pub struct Point { field: i32 }\npub fun complete() { let point = Point { field: 1 }; point.fi }\n";
     fs::write(&model, model_text).unwrap();
     let uri = lsp_types::Url::from_file_path(&model).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: model_text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(model_text, Some(1)))]);
 
     let items = completion_items_for_document(
         &uri,
@@ -923,7 +875,6 @@ fn project_member_completion_uses_active_module_coordinates() {
             model_text.find("point.fi").unwrap() + "point.fi".len(),
         ),
         CompileOptions { use_std: false },
-        &AnalysisSessions::default(),
         &AnalysisSessions::default(),
         || false,
     )
@@ -939,13 +890,7 @@ fn completion_preserves_std_member_items_through_document_sessions() {
     let uri = lsp_types::Url::parse("file:///riddle-lsp-completion.rid").unwrap();
     let text =
         "use std::vector::Vector; fun main() { let c: Vector<i32> = Vector::new(); let d = c.i }";
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(text, Some(1)))]);
     let sessions = AnalysisSessions::default();
 
     let items = completion_items_for_document(
@@ -954,7 +899,6 @@ fn completion_preserves_std_member_items_through_document_sessions() {
         position(text, text.find("c.i").unwrap() + 3),
         CompileOptions::default(),
         &sessions,
-        &AnalysisSessions::default(),
         || false,
     )
     .unwrap()

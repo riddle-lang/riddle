@@ -196,13 +196,7 @@ fn definition_and_implementation_follow_trait_dispatch() {
 fn navigation_preserves_non_file_document_uris() {
     let source = "fun value() -> i32 { 1 } fun main() { value(); }";
     let uri = lsp_types::Url::parse("untitled:riddle-navigation.rid").unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: source.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(source, Some(1)))]);
     let cursor = position(source, source.rfind("value()").unwrap() + 2);
     let sessions = AnalysisSessions::default();
 
@@ -267,13 +261,7 @@ fn definition_maps_project_symbols_to_unopened_modules() {
     fs::write(&util, util_source).unwrap();
     let main_uri = lsp_types::Url::from_file_path(&main).unwrap();
     let util_uri = lsp_types::Url::from_file_path(fs::canonicalize(&util).unwrap()).unwrap();
-    let docs = HashMap::from([(
-        main_uri.clone(),
-        Document {
-            text: main_source.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(main_uri.clone(), Document::new(main_source, Some(1)))]);
 
     let definition = definition_for_document(
         &main_uri,
@@ -496,20 +484,8 @@ fn project_rename_uses_overlays_and_versions_only_open_documents() {
     let consumer_uri =
         lsp_types::Url::from_file_path(fs::canonicalize(&consumer).unwrap()).unwrap();
     let docs = HashMap::from([
-        (
-            main_uri.clone(),
-            Document {
-                text: main_source.into(),
-                version: Some(7),
-            },
-        ),
-        (
-            util_uri.clone(),
-            Document {
-                text: util_overlay.into(),
-                version: Some(9),
-            },
-        ),
+        (main_uri.clone(), Document::new(main_source, Some(7))),
+        (util_uri.clone(), Document::new(util_overlay, Some(9))),
     ]);
     let cursor = position(main_source, main_source.find("value()").unwrap() + 2);
     let sessions = AnalysisSessions::default();

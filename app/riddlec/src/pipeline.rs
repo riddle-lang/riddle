@@ -6,6 +6,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
+    time::Instant,
 };
 
 use ast::{self, support::AstNode};
@@ -19,6 +20,58 @@ use syntax::SyntaxNode;
 use type_checker::{self, IncrementalTypeChecker, TypeCheckResult, check_hir};
 
 use crate::text_range;
+
+/// Where compilation time goes, printed when `RIDDLEC_PHASE_TIMING` is set.
+///
+/// A whole project check is the dominant cost behind every language-server
+/// request, and the phase boundaries already exist as cancellation checks. This
+/// only adds an `Instant` read per boundary, and nothing at all when the
+/// variable is unset. The enabled flag is read once per pipeline run rather
+/// than per phase.
+struct PhaseTimer {
+    total: Instant,
+    started: Option<Instant>,
+}
+
+impl PhaseTimer {
+    fn new(enabled: bool) -> Self {
+        let total = Instant::now();
+        Self {
+            total,
+            started: enabled.then_some(total),
+        }
+    }
+
+    /// Whether timing is being collected at all.
+    const fn enabled(&self) -> bool {
+        self.started.is_some()
+    }
+
+    /// Reports the phase that just ended.
+    fn phase(&mut self, name: &str) {
+        self.phase_with_counts(name, 0, 0);
+    }
+
+    /// Reports a phase along with the body-reuse counters it produced.
+    fn phase_with_counts(&mut self, name: &str, checked: usize, reused: usize) {
+        let Some(started) = self.started else {
+            return;
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(started);
+        let counts = if checked == 0 && reused == 0 {
+            String::new()
+        } else {
+            format!("   [checked {checked}, reused {reused}]")
+        };
+        eprintln!(
+            "[phase] {name:<22} {:>8.2} ms   (cumulative {:>8.2} ms){counts}",
+            elapsed.as_secs_f64() * 1000.0,
+            now.duration_since(self.total).as_secs_f64() * 1000.0,
+        );
+        self.started = Some(now);
+    }
+}
 
 pub use type_checker::Diagnostic;
 
@@ -414,16 +467,61 @@ impl Default for CompileOptions {
     }
 }
 
-#[derive(Default)]
 pub struct CheckSession {
     parser: IncrementalParser,
     type_checker: IncrementalTypeChecker,
+    /// Process-unique identity, so a trace can tell a reused session from a
+    /// recreated one that happens to hold the same number of bodies.
+    id: usize,
+}
+
+/// Assigns process-unique identities to `CheckSession`s, for tracing.
+///
+/// A reused session keeps its identity across requests while a recreated one
+/// gets a new number, which is how a trace tells "the entries were dropped"
+/// apart from "the checker was replaced" — identical from the outside, and
+/// ~700 ms apart in cost.
+static CHECK_SESSIONS_CREATED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+impl Default for CheckSession {
+    /// Counted, because both `CheckSession::new` and `or_default` reach here.
+    fn default() -> Self {
+        let id = CHECK_SESSIONS_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        Self {
+            parser: IncrementalParser::default(),
+            type_checker: IncrementalTypeChecker::default(),
+            id,
+        }
+    }
 }
 
 impl CheckSession {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many function bodies this session's incremental checker holds.
+    ///
+    /// Exposed so a caller can tell "the checker was replaced" apart from "the
+    /// entries were dropped", which look identical from the outside and differ
+    /// by roughly 700 ms on the next check.
+    #[must_use]
+    pub fn known_bodies(&self) -> usize {
+        self.type_checker.known_bodies()
+    }
+
+    /// Reuse counters from this session's most recent check.
+    #[must_use]
+    pub const fn last_stats(&self) -> type_checker::IncrementalStats {
+        self.type_checker.last_stats()
+    }
+
+    /// Process-unique identity of this session, for traces.
+    #[must_use]
+    pub const fn identity(&self) -> usize {
+        self.id
     }
 
     /// Checks a source buffer while reusing this session's incremental state.
@@ -1596,6 +1694,7 @@ fn run_pipeline_with_state_cancellable_and_names(
         parser,
         incremental_type_checker,
     } = state;
+    let mut timer = PhaseTimer::new(std::env::var_os("RIDDLEC_PHASE_TIMING").is_some());
     if cancelled() {
         return None;
     }
@@ -1622,6 +1721,7 @@ fn run_pipeline_with_state_cancellable_and_names(
     let parse = prepared_parse
         .as_ref()
         .unwrap_or_else(|| update_parse(parser, source));
+    timer.phase("1 parse");
     if cancelled() {
         return None;
     }
@@ -1636,6 +1736,7 @@ fn run_pipeline_with_state_cancellable_and_names(
     let syntax = parse.syntax();
     let root = ast::Root::cast(syntax.clone()).unwrap();
     let mut hir = lower_root(&root);
+    timer.phase("2 lower HIR");
     if cancelled() {
         return None;
     }
@@ -1649,6 +1750,7 @@ fn run_pipeline_with_state_cancellable_and_names(
     // 3. Build scope graph + resolve names
     let (sg, scope_diagnostics) = build_scope_graph(&hir, &syntax);
     resolve_hir(&mut hir, &sg);
+    timer.phase("3 scope graph");
     if cancelled() {
         return None;
     }
@@ -1661,10 +1763,34 @@ fn run_pipeline_with_state_cancellable_and_names(
     }
 
     // 4. Type check
-    let type_result = incremental_type_checker.map_or_else(
-        || check_hir(&hir),
-        |checker| checker.check_with_syntax(&hir, &syntax).result,
-    );
+    let type_result = match incremental_type_checker {
+        Some(checker) => {
+            let checked = checker.check_with_syntax(&hir, &syntax);
+            // Reuse is the whole point of the incremental checker: if the
+            // standard library is being re-checked on every keystroke, the
+            // counters say so.
+            timer.phase_with_counts(
+                "4a type check",
+                checked.stats.checked_bodies,
+                checked.stats.reused_bodies,
+            );
+            if timer.enabled() {
+                eprintln!(
+                    "[phase]    reuse detail: absent {} missed_context {} missed_body {} \
+                     missed_replay {} globals_rebuilt {}",
+                    checked.stats.missed_absent,
+                    checked.stats.missed_context,
+                    checked.stats.missed_body,
+                    checked.stats.missed_replay,
+                    checked.stats.rebuilt_globals,
+                );
+                // Which part of the context moved, when it did.
+                let _ = type_checker::incremental::context_fingerprint_parts(&hir.item_tree);
+            }
+            checked.result
+        }
+        None => check_hir(&hir),
+    };
     if cancelled() {
         return None;
     }
@@ -1686,12 +1812,14 @@ fn run_pipeline_with_state_cancellable_and_names(
 
     // 5. Escape analysis (determines which locals need heap allocation)
     let escape_result = escape_analysis::analyze_escapes(&hir, &type_result);
+    timer.phase("5 escape analysis");
     if cancelled() {
         return None;
     }
 
     // 6. Move and borrow checking is independent of storage placement.
     let analysis = move_checker::analyze(&hir, &type_result);
+    timer.phase("6 move/borrow");
     if cancelled() {
         return None;
     }

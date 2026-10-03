@@ -15,9 +15,22 @@ async function activate(context) {
     {
       documentSelector: [
         { scheme: 'file', language: 'riddle' },
-        { scheme: 'file', pattern: '**/Clue.toml' },
-        { scheme: 'untitled', pattern: 'Clue.toml' },
+        { scheme: 'untitled', language: 'riddle' },
+        // The manifest is registered as its own language so the server's
+        // `Clue.toml` diagnostics, completions and hover are reachable.
+        // Matching on the filename alone left the file to the built-in TOML
+        // extension, and the server never received it.
+        { scheme: 'file', language: 'clue' },
+        { scheme: 'untitled', language: 'clue' },
       ],
+      middleware: {
+        provideInlayHints: async (document, range, token, next) => {
+          if (!vscode.workspace.getConfiguration('riddle').get('inlayHints.enabled', true)) {
+            return [];
+          }
+          return next(document, range, token);
+        },
+      },
     },
   );
 

@@ -206,10 +206,7 @@ fn manifest_diagnostics_flow_through_the_workspace_pipeline() {
     let mut docs = HashMap::new();
     docs.insert(
         uri.clone(),
-        Document {
-            text: "[package]\nname = \"demo\"\nmistake = 1\n".into(),
-            version: Some(1),
-        },
+        Document::new("[package]\nname = \"demo\"\nmistake = 1\n", Some(1)),
     );
     let mut sessions = DiagnosticSessions::default();
     let published = collect_workspace_diagnostics_cancellable(

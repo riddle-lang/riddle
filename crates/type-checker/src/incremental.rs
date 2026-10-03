@@ -29,6 +29,16 @@ use crate::{
 pub struct IncrementalStats {
     pub checked_bodies: usize,
     pub reused_bodies: usize,
+    /// Bodies whose cached entry was not even considered: no entry at all.
+    pub missed_absent: usize,
+    /// Bodies whose cached entry carried a different type-context fingerprint.
+    pub missed_context: usize,
+    /// Bodies whose type context matched but whose own fingerprint did not.
+    pub missed_body: usize,
+    /// Bodies that matched on both fingerprints but could not be replayed.
+    pub missed_replay: usize,
+    /// Whether the type context itself was recomputed rather than reused.
+    pub rebuilt_globals: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +52,34 @@ pub struct IncrementalTypeChecker {
     bodies: HashMap<FunctionId, CachedBody>,
     globals: Option<CachedGlobals>,
     last_source: Option<String>,
+    /// The type-context fingerprint of the last check, so a trace can show
+    /// whether it moved and by how much.
+    last_context_hash: Option<u64>,
+    /// Reuse counters from the most recent check, so a caller can assert that
+    /// an edit re-checked only what it had to.
+    last_stats: IncrementalStats,
+}
+
+impl IncrementalTypeChecker {
+    /// How many bodies this checker currently holds.
+    ///
+    /// A checker that keeps its entries serves the next request from them; one
+    /// that lost them re-type-checks the whole standard library. The difference
+    /// is ~700 ms and nothing else in the system reports which happened.
+    #[must_use]
+    pub fn known_bodies(&self) -> usize {
+        self.bodies.len()
+    }
+
+    /// Reuse counters from the most recent check.
+    ///
+    /// The interesting figure is `checked_bodies` on a warm checker: an edit to
+    /// one function may re-check that one body and nothing else, or all ~827
+    /// standard-library bodies, and only these counters say which.
+    #[must_use]
+    pub const fn last_stats(&self) -> IncrementalStats {
+        self.last_stats
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -113,13 +151,23 @@ impl IncrementalTypeChecker {
             .last_source
             .as_deref()
             .map(|old_source| text_edit(old_source, &source));
+        if std::env::var_os("RIDDLEC_PHASE_TIMING").is_some() {
+            eprintln!(
+                "[phase]    check_with_syntax: known bodies {} previous context {:#x} edit {:?}",
+                self.bodies.len(),
+                self.last_context_hash.unwrap_or(0),
+                edit,
+            );
+        }
+        let context_hash = type_context_fingerprint_with_packages(hir);
         let result = self.check_inner(
             hir,
             |body| syntax_body_fingerprint(body, syntax),
             edit,
-            type_context_fingerprint_with_packages(hir),
+            context_hash,
         );
         self.last_source = Some(source);
+        self.last_context_hash = Some(context_hash);
         result
     }
 
@@ -165,6 +213,7 @@ impl IncrementalTypeChecker {
         };
         checker.build_trait_env();
         checker.validate_copy_impls();
+        stats.rebuilt_globals = cached_globals.is_none();
         self.globals = Some(CachedGlobals {
             type_context_hash,
             value_diagnostics,
@@ -175,6 +224,20 @@ impl IncrementalTypeChecker {
         // as function bodies. Recheck them on each incremental pass so an
         // initializer diagnostic cannot disappear behind a reused function.
         checker.check_const_bodies();
+
+        if std::env::var_os("RIDDLEC_PHASE_TIMING").is_some() {
+            let cached_context = self
+                .bodies
+                .values()
+                .next()
+                .map(|cached| cached.type_context_hash);
+            eprintln!(
+                "[phase]    before body loop: checker {:#x}, cache {} entries, cached context {:?}, current {type_context_hash:#x}",
+                std::ptr::from_ref(self) as usize,
+                self.bodies.len(),
+                cached_context.map(|hash| format!("{hash:#x}")),
+            );
+        }
 
         for (fid, function) in hir.item_tree.functions.iter() {
             let Some(body_id) = hir.function_bodies.get(&fid).copied() else {
@@ -193,6 +256,34 @@ impl IncrementalTypeChecker {
                 continue;
             }
 
+            // Record why the entry above did not apply, so a caller can tell a
+            // genuinely changed body from a cache that stopped matching.
+            match self.bodies.get(&fid) {
+                None => {
+                    if std::env::var_os("RIDDLEC_PHASE_TIMING").is_some() && stats.missed_absent < 3
+                    {
+                        let mut keys: Vec<String> = self
+                            .bodies
+                            .keys()
+                            .take(3)
+                            .map(|key| format!("{key:?}"))
+                            .collect();
+                        keys.sort();
+                        eprintln!(
+                            "[phase]    absent fid {fid:?} (name {:?}); cache holds {} entries, \
+                             first keys {keys:?}",
+                            function.name.0,
+                            self.bodies.len(),
+                        );
+                    }
+                    stats.missed_absent += 1;
+                }
+                Some(cached) if cached.type_context_hash != type_context_hash => {
+                    stats.missed_context += 1;
+                }
+                Some(cached) if cached.body_hash != body_hash => stats.missed_body += 1,
+                Some(_) => stats.missed_replay += 1,
+            }
             stats.checked_bodies += 1;
             let diagnostic_start = checker.result.diagnostics.len();
             let generic_edge_start = checker.generic_edges.len();
@@ -226,6 +317,7 @@ impl IncrementalTypeChecker {
         self.bodies
             .retain(|function, _| live_functions.contains(function));
         checker.check_generic_recursion();
+        self.last_stats = stats;
 
         IncrementalTypeCheckResult {
             result: checker.result,
@@ -574,11 +666,54 @@ fn type_context_fingerprint(tree: &ItemTree) -> u64 {
     hasher.finish()
 }
 
+/// Fingerprint of everything that can change how a body type-checks.
+///
+/// Deliberately blind to absolute source positions. It used to be this hash
+/// combined with `format!("{tree:?}")`, and since `Debug` carries every item's
+/// `TextRange`, editing one character moved the items after it and changed the
+/// fingerprint. Every cached body in the bundle was then discarded — including
+/// the standard library's, which is most of them. `RIDDLEC_PHASE_TIMING` showed
+/// a whole-project check spending ~700 ms re-type-checking 827 unchanged bodies
+/// on each keystroke for that reason.
+///
+/// Declarations still participate through `hash_function` and friends, which
+/// cover names, signatures, generic bounds, variants and fields. Bodies do not:
+/// they are tracked individually by `body_fingerprint` and
+/// `syntax_body_fingerprint`, which decide whether one body needs re-checking.
 fn type_context_fingerprint_with_ranges(tree: &ItemTree) -> u64 {
     let mut hasher = DefaultHasher::new();
     type_context_fingerprint(tree).hash(&mut hasher);
-    format!("{tree:?}").hash(&mut hasher);
     hasher.finish()
+}
+
+/// The three components of the type-context fingerprint, for tracing.
+///
+/// Exists so a caller can tell *which* part of the context moved — declarations,
+/// the item structure, or function signatures — without guessing. Two of the
+/// three are already inside [`type_context_fingerprint`]; the middle one is not,
+/// and is what reveals a shape change.
+#[must_use]
+pub fn context_fingerprint_parts(tree: &ItemTree) -> (u64, u64, u64) {
+    let declarations = type_context_fingerprint(tree);
+    let mut structure = DefaultHasher::new();
+    format!("{:?}", tree.top_level).hash(&mut structure);
+    format!("{:?}", tree.extern_function_ids).hash(&mut structure);
+    let mut signatures = DefaultHasher::new();
+    for (_, function) in tree.functions.iter() {
+        hash_function(function, &mut signatures);
+    }
+    let parts = (declarations, structure.finish(), signatures.finish());
+    if std::env::var_os("RIDDLEC_PHASE_TIMING").is_some() {
+        eprintln!(
+            "[phase]    context fingerprint: {} functions, decl {:#x} structure {:#x} \
+             signatures {:#x}",
+            tree.functions.len(),
+            parts.0,
+            parts.1,
+            parts.2,
+        );
+    }
+    parts
 }
 
 fn type_context_fingerprint_with_packages(hir: &HirFile) -> u64 {

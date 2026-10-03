@@ -18,6 +18,7 @@
   ],
   "activationEvents": [
     "onLanguage:riddle",
+    "onLanguage:clue",
     "workspaceContains:**/Clue.toml"
   ],
   "main": "./dist/extension.js",
@@ -49,6 +50,17 @@
           ".rid"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "clue",
+        "aliases": [
+          "Clue",
+          "clue"
+        ],
+        "filenames": [
+          "Clue.toml"
+        ],
+        "configuration": "./clue-language-configuration.json"
       }
     ],
     "grammars": [
@@ -80,6 +92,21 @@
           },
           "default": [],
           "description": "Arguments passed to riddle-lsp."
+        },
+        "riddle.inlayHints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred types and argument names inline."
+        },
+        "riddle.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the JSON-RPC traffic between VS Code and riddle-lsp."
         }
       }
     }

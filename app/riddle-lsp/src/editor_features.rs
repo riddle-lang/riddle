@@ -24,23 +24,58 @@ pub fn format_source(source: &str, tab_size: u32, insert_spaces: bool) -> String
     )
 }
 
+/// Whether a token is a comment of any flavour.
+fn is_comment_kind(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::LineComment
+            | SyntaxKind::DocComment
+            | SyntaxKind::BlockComment
+            | SyntaxKind::DocBlockComment
+    )
+}
+
 #[must_use]
 pub fn folding_ranges(source: &str) -> Vec<FoldingRange> {
     let index = LineIndex::new(source);
+    let tokens = frontend::lexer::lex(source);
+    let mut ranges = brace_folding_ranges(source, &index, &tokens);
+    ranges.extend(comment_folding_ranges(source, &index, &tokens));
+    ranges.extend(use_folding_ranges(source, &index));
+    ranges.sort_by_key(|range| (range.start_line, range.start_character));
+    ranges.dedup_by(|left, right| {
+        left.start_line == right.start_line
+            && left.end_line == right.end_line
+            && left.kind == right.kind
+    });
+    ranges
+}
+
+/// Brace-delimited blocks, the only thing the server used to fold.
+///
+/// These are genuine regions: a client that collapses one is hiding an
+/// implementation, not a comment.
+fn brace_folding_ranges(
+    source: &str,
+    index: &LineIndex,
+    tokens: &[frontend::lexer::Token],
+) -> Vec<FoldingRange> {
     let mut stack = Vec::new();
     let mut ranges = Vec::new();
-    for token in frontend::lexer::lex(source) {
+    for token in tokens {
         match token.kind {
             SyntaxKind::LBrace => stack.push(token.span.start),
             SyntaxKind::RBrace => {
                 let Some(start) = stack.pop() else {
                     continue;
                 };
-                let start = index.position(source, start);
-                let end = index.position(source, token.span.end.saturating_sub(1));
-                if let (Some(start), Some(end)) = (start, end)
-                    && start.line < end.line
-                {
+                let Some(start) = index.position(source, start) else {
+                    continue;
+                };
+                let Some(end) = index.position(source, token.span.end.saturating_sub(1)) else {
+                    continue;
+                };
+                if start.line < end.line {
                     ranges.push(FoldingRange {
                         start_line: start.line,
                         start_character: Some(start.character),
@@ -54,7 +89,111 @@ pub fn folding_ranges(source: &str) -> Vec<FoldingRange> {
             _ => {}
         }
     }
-    ranges.sort_by_key(|range| (range.start_line, range.start_character));
+    ranges
+}
+
+/// Runs of consecutive comment lines, folded as `comment`.
+///
+/// The lexer reports a multi-line block comment as one token, so its line span
+/// is folded directly; single-line comments are grouped while they stay
+/// adjacent.
+fn comment_folding_ranges(
+    source: &str,
+    index: &LineIndex,
+    tokens: &[frontend::lexer::Token],
+) -> Vec<FoldingRange> {
+    let mut ranges = Vec::new();
+    let mut run: Option<(u32, u32)> = None;
+    let flush = |run: &mut Option<(u32, u32)>, ranges: &mut Vec<FoldingRange>| {
+        if let Some((start, end)) = run.take()
+            && start < end
+        {
+            ranges.push(FoldingRange {
+                start_line: start,
+                start_character: None,
+                end_line: end,
+                end_character: None,
+                kind: Some(FoldingRangeKind::Comment),
+                collapsed_text: None,
+            });
+        }
+    };
+    for token in tokens {
+        if !is_comment_kind(token.kind) {
+            flush(&mut run, &mut ranges);
+            continue;
+        }
+        let Some(start) = index.position(source, token.span.start) else {
+            continue;
+        };
+        let Some(end) = index.position(source, token.span.end.saturating_sub(1)) else {
+            continue;
+        };
+        match run {
+            // Adjacent to the previous comment line: extend the run.
+            Some((run_start, run_end)) if start.line <= run_end + 1 => {
+                run = Some((run_start, run_end.max(end.line)));
+            }
+            _ => {
+                flush(&mut run, &mut ranges);
+                run = Some((start.line, end.line));
+            }
+        }
+    }
+    flush(&mut run, &mut ranges);
+    ranges
+}
+
+/// A top-level `use` run, folded as `imports`.
+fn use_folding_ranges(source: &str, index: &LineIndex) -> Vec<FoldingRange> {
+    let mut ranges = Vec::new();
+    let mut run: Option<(u32, u32)> = None;
+    let flush = |run: &mut Option<(u32, u32)>, ranges: &mut Vec<FoldingRange>| {
+        if let Some((start, end)) = run.take()
+            && start < end
+        {
+            ranges.push(FoldingRange {
+                start_line: start,
+                start_character: None,
+                end_line: end,
+                end_character: None,
+                kind: Some(FoldingRangeKind::Imports),
+                collapsed_text: None,
+            });
+        }
+    };
+    let mut in_use = false;
+    for token in frontend::lexer::lex(source) {
+        if token.kind.is_trivia() {
+            continue;
+        }
+        if token.kind == SyntaxKind::Use {
+            let Some(start) = index.position(source, token.span.start) else {
+                continue;
+            };
+            // A `use` tree can span lines; fold it as a run with its neighbours.
+            let end_line = source[token.span.start..]
+                .find(';')
+                .and_then(|offset| index.position(source, token.span.start + offset))
+                .map_or(start.line, |position| position.line);
+            match run {
+                Some((run_start, run_end)) if start.line <= run_end + 1 => {
+                    run = Some((run_start, run_end.max(end_line)));
+                }
+                _ => {
+                    flush(&mut run, &mut ranges);
+                    run = Some((start.line, end_line));
+                }
+            }
+            in_use = true;
+            continue;
+        }
+        if in_use {
+            flush(&mut run, &mut ranges);
+            in_use = false;
+        }
+    }
+    flush(&mut run, &mut ranges);
     ranges
 }
 
@@ -139,10 +278,11 @@ fn symbol_for_item(
     match item {
         TopLevelItem::Function(id) => {
             let item = &hir.item_tree.functions[id];
-            symbol(
+            item_symbol(
                 range_for,
                 &item.name.0,
                 SymbolKind::FUNCTION,
+                item.extent,
                 item.name_range,
                 None,
             )
@@ -150,30 +290,33 @@ fn symbol_for_item(
         TopLevelItem::Struct(id) => {
             let item = &hir.item_tree.structs[id];
             let children = symbols_for_fields(&item.fields, range_for);
-            symbol(
+            item_symbol(
                 range_for,
                 &item.name.0,
                 SymbolKind::STRUCT,
+                item.extent,
                 item.name_range,
                 Some(children),
             )
         }
         TopLevelItem::Enum(id) => {
             let item = &hir.item_tree.enums[id];
-            symbol(
+            item_symbol(
                 range_for,
                 &item.name.0,
                 SymbolKind::ENUM,
+                item.extent,
                 item.name_range,
                 Some(symbols_for_enum_children(item, range_for)),
             )
         }
         TopLevelItem::Trait(id) => {
             let item = &hir.item_tree.traits[id];
-            symbol(
+            item_symbol(
                 range_for,
                 &item.name.0,
                 SymbolKind::INTERFACE,
+                item.extent,
                 item.name_range,
                 Some(symbols_for_methods(&item.methods, range_for)),
             )
@@ -184,35 +327,39 @@ fn symbol_for_item(
                 .items
                 .as_deref()
                 .map(|items| symbols_for_items(hir, items, range_for));
-            symbol(
+            item_symbol(
                 range_for,
                 &item.name.0,
                 SymbolKind::MODULE,
+                item.extent,
                 item.name_range,
                 children,
             )
         }
         TopLevelItem::Const(id) => {
             let item = &hir.item_tree.consts[id];
-            symbol(
+            item_symbol(
                 range_for,
                 &item.name.0,
                 SymbolKind::CONSTANT,
+                item.extent,
                 item.name_range,
                 None,
             )
         }
         TopLevelItem::TypeAlias(id) => {
             let item = &hir.item_tree.type_aliases[id];
-            symbol(
+            item_symbol(
                 range_for,
                 &item.name.0,
                 SymbolKind::TYPE_PARAMETER,
+                item.extent,
                 item.name_range,
                 None,
             )
         }
-        TopLevelItem::Impl(_) | TopLevelItem::Use(_) => None,
+        TopLevelItem::Impl(id) => symbols_for_impl(hir, id, range_for),
+        TopLevelItem::Use(_) => None,
     }
 }
 
@@ -227,6 +374,7 @@ fn symbols_for_fields(
                 range_for,
                 &field.name.0,
                 SymbolKind::FIELD,
+                field.ty_range,
                 field.name_range,
                 None,
             )
@@ -250,6 +398,7 @@ fn symbols_for_enum_children(
                 &variant.name.0,
                 SymbolKind::ENUM_MEMBER,
                 variant.name_range,
+                variant.name_range,
                 Some(fields),
             )
         })
@@ -267,6 +416,7 @@ fn symbols_for_methods(
                 range_for,
                 &method.name.0,
                 SymbolKind::METHOD,
+                method.extent,
                 method.name_range,
                 None,
             )
@@ -279,10 +429,16 @@ fn symbol(
     range_for: &impl Fn(rowan::TextRange) -> Option<lsp_types::Range>,
     name: &str,
     kind: SymbolKind,
-    range: rowan::TextRange,
+    extent: rowan::TextRange,
+    name_range: rowan::TextRange,
     children: Option<Vec<DocumentSymbol>>,
 ) -> Option<DocumentSymbol> {
-    let range = range_for(range)?;
+    // `range` is the whole item and `selectionRange` the identifier, which is
+    // what clients use to highlight the item in the outline and to scroll to
+    // it. Reporting the name span for both made peek views and sticky scroll
+    // show the identifier alone.
+    let range = range_for(extent)?;
+    let selection_range = range_for(name_range).unwrap_or(range);
     Some(DocumentSymbol {
         name: name.into(),
         detail: None,
@@ -290,9 +446,88 @@ fn symbol(
         tags: None,
         deprecated: None,
         range,
-        selection_range: range,
+        selection_range,
         children,
     })
+}
+
+/// A symbol whose extent is the whole item, falling back to the name span for
+/// items lowered without one.
+#[allow(deprecated)]
+fn item_symbol(
+    range_for: &impl Fn(rowan::TextRange) -> Option<lsp_types::Range>,
+    name: &str,
+    kind: SymbolKind,
+    extent: rowan::TextRange,
+    name_range: rowan::TextRange,
+    children: Option<Vec<DocumentSymbol>>,
+) -> Option<DocumentSymbol> {
+    symbol(range_for, name, kind, extent, name_range, children)
+}
+
+/// Methods, consts, and associated types of an `impl` block, as outline
+/// children of a container symbol.
+///
+/// The container is named after the implementing type and carries the trait
+/// name as detail, so the outline reads like the source does. Impl blocks used
+/// to be dropped from the outline entirely, which meant every method defined in
+/// one was invisible to breadcrumbs and the symbol list even though
+/// `workspace/symbol` found them.
+fn symbols_for_impl(
+    hir: &hir::HirFile,
+    id: hir::item_tree::ImplId,
+    range_for: &impl Fn(rowan::TextRange) -> Option<lsp_types::Range>,
+) -> Option<DocumentSymbol> {
+    let item = &hir.item_tree.impls[id];
+    let name = item.self_ty.display();
+    let trait_name = item
+        .trait_ty
+        .as_ref()
+        .map(hir::item_tree::HirTypeRef::display);
+    let mut children = Vec::new();
+    for id in &item.methods {
+        let method = &hir.item_tree.functions[*id];
+        children.extend(item_symbol(
+            range_for,
+            &method.name.0,
+            SymbolKind::METHOD,
+            method.extent,
+            method.name_range,
+            None,
+        ));
+    }
+    for id in &item.consts {
+        let konst = &hir.item_tree.consts[*id];
+        children.extend(item_symbol(
+            range_for,
+            &konst.name.0,
+            SymbolKind::CONSTANT,
+            konst.extent,
+            konst.name_range,
+            None,
+        ));
+    }
+    for id in &item.type_aliases {
+        let alias = &hir.item_tree.type_aliases[*id];
+        children.extend(item_symbol(
+            range_for,
+            &alias.name.0,
+            SymbolKind::TYPE_PARAMETER,
+            alias.extent,
+            alias.name_range,
+            None,
+        ));
+    }
+    let mut symbol = item_symbol(
+        range_for,
+        &name,
+        SymbolKind::NAMESPACE,
+        item.extent,
+        item.self_ty_range,
+        Some(children),
+    )?;
+    symbol.detail = trait_name;
+    Some(symbol)
 }
 
 pub fn document_symbols_for_document_cancellable<S: BuildHasher>(

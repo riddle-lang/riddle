@@ -731,6 +731,74 @@ fun empty() -> i32 { panic!() }
 }
 
 #[test]
+fn unreachable_macro_in_statement_position_keeps_the_following_statement() {
+    // Reported from an editor: typing a bare identifier after
+    // `unreachable!("...");` broke the language server. The coverage above only
+    // exercises these macros inside match arms, without the trailing semicolon.
+    let source = r#"
+        fun main() {
+            unreachable!("Fuckypi");
+            let after = 1;
+        }
+    "#;
+    let expanded = expand_standard_macros(source);
+
+    assert!(
+        expanded.diagnostics.is_empty(),
+        "{:?}\n{}",
+        expanded.diagnostics,
+        expanded.source
+    );
+    assert!(
+        !expanded.source.contains("unreachable!"),
+        "the macro should be gone:\n{}",
+        expanded.source
+    );
+    assert!(
+        expanded.source.contains("let after = 1;"),
+        "the statement after the macro must survive:\n{}",
+        expanded.source
+    );
+
+    let result = check_with_options(source, CompileOptions::default());
+    assert!(
+        result.success(),
+        "macro={:?}\nparse={:?}\nhir={:?}\ntype={:?}",
+        result.macro_diagnostics,
+        result.parse_errors,
+        result.hir_diagnostics,
+        result.type_result.diagnostics,
+    );
+}
+
+#[test]
+fn an_incomplete_identifier_after_a_discarded_macro_stays_diagnosable() {
+    // The editor state from the report: the user has typed the macro's
+    // statement and is one character into the next one. Expansion, parsing and
+    // diagnostics all have to terminate and stay well-formed, because the
+    // language server runs them on every keystroke.
+    let source = "fun main() {\n    unreachable!(\"Fuckypi\");\n    p\n}\n";
+
+    let expanded = expand_standard_macros(source);
+    assert!(
+        !expanded.source.contains("unreachable!"),
+        "the macro should be gone:\n{}",
+        expanded.source
+    );
+    assert!(
+        expanded.source.contains('p'),
+        "the identifier being typed must survive:\n{}",
+        expanded.source
+    );
+
+    let result = check_with_options(source, CompileOptions::default());
+    assert!(
+        !result.success(),
+        "an incomplete statement is an error, but it must be reported, not lost"
+    );
+}
+
+#[test]
 fn standard_panic_family_macros_expand_and_type_check() {
     let source = r#"
         #[derive(Debug, PartialEq)]

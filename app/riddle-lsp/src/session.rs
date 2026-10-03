@@ -1,38 +1,70 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use riddlec::pipeline::CheckSession;
 
 use crate::server::Document;
 
+/// Logs when an analysis session is created, under `RIDDLEC_PHASE_TIMING`.
+///
+/// A `CheckSession` or `ProjectSession` that is created more than once for the
+/// same document or project means the incremental state behind it — including
+/// the standard library's ~827 checked bodies — was thrown away.
+fn trace_session(event: &str, key: &str) {
+    if std::env::var_os("RIDDLEC_PHASE_TIMING").is_some() {
+        let name = key.rsplit(['/', '\\']).next().unwrap_or(key);
+        eprintln!("[session] {event:<30} {name}");
+    }
+}
+
 #[derive(Default)]
 pub struct AnalysisSessions {
     standalone: Mutex<HashMap<lsp_types::Url, Arc<Mutex<CheckSession>>>>,
     projects: Mutex<HashMap<PathBuf, Arc<Mutex<clue::ProjectSession>>>>,
+    /// Process-unique identity, so a trace can tell which of the server's
+    /// several session sets a request landed on. The server builds one set for
+    /// analysis and one for completion, and only a trace can show which one a
+    /// given request used.
+    id: AtomicU64,
 }
 
 impl AnalysisSessions {
+    /// Assigns the process-unique identity on first use.
+    fn identity(&self) -> u64 {
+        if self.id.load(Ordering::Relaxed) == 0 {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+            self.id
+                .store(NEXT_ID.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+        }
+        self.id.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn standalone(&self, uri: &lsp_types::Url) -> Arc<Mutex<CheckSession>> {
-        Arc::clone(
-            self.standalone
-                .lock()
-                .unwrap()
-                .entry(uri.clone())
-                .or_default(),
-        )
+        let mut standalone = self.standalone.lock().unwrap();
+        if !standalone.contains_key(uri) {
+            trace_session(
+                &format!("analysis standalone: create (set {})", self.identity()),
+                uri.as_str(),
+            );
+        }
+        Arc::clone(standalone.entry(uri.clone()).or_default())
     }
 
     pub(crate) fn project(&self, root: &std::path::Path) -> Arc<Mutex<clue::ProjectSession>> {
-        Arc::clone(
-            self.projects
-                .lock()
-                .unwrap()
-                .entry(root.to_path_buf())
-                .or_default(),
-        )
+        let mut projects = self.projects.lock().unwrap();
+        if !projects.contains_key(root) {
+            trace_session(
+                &format!("analysis project: create (set {})", self.identity()),
+                &root.display().to_string(),
+            );
+        }
+        Arc::clone(projects.entry(root.to_path_buf()).or_default())
     }
 
     pub(crate) fn retain_open(&self, docs: &HashMap<lsp_types::Url, Document>) {

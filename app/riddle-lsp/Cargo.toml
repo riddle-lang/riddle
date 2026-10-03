@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 ast = { path = "../../crates/ast" }
-clap = { version = "=4.5.61", features = ["derive", "string"] }
+clap = { version = "=4.5.61", features = ["derive", "string", "env"] }
 clue = { path = "../clue" }
 frontend = { path = "../../crates/frontend" }
 hir = { path = "../../crates/hir" }

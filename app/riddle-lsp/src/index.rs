@@ -48,6 +48,13 @@ pub struct IndexedSymbol {
     pub name: String,
     pub detail: String,
     pub location: Location,
+    /// The identifier span, which selectionRange reports to the client.
+    pub selection_range: Range,
+    /// Byte offsets of the identifier in source.
+    ///
+    /// Cross-package matching works on raw source ranges, while key holds the
+    /// whole item, so the name has to be remembered separately.
+    pub name_source_range: std::ops::Range<u32>,
     pub container_name: Option<String>,
     pub is_public: bool,
 }
@@ -73,6 +80,86 @@ pub struct ProjectIndex {
     pub symbols: Vec<IndexedSymbol>,
     pub calls: Vec<CallEdge>,
     pub types: TypeRelations,
+    /// `SymbolKey` → position in `symbols`.
+    ///
+    /// Call and type hierarchy used to find symbols by scanning the whole
+    /// vector per edge, which is O(edges × symbols) on every request.
+    by_key: HashMap<SymbolKey, usize>,
+    /// `(uri, start, end)` → position in `symbols`, for hit-testing a location.
+    ///
+    /// Positions are flattened into integers because `lsp_types::Position` and
+    /// `Range` do not implement `Hash`.
+    by_location: HashMap<LocationKey, usize>,
+}
+
+impl ProjectIndex {
+    /// Builds the lookup tables an index needs to answer hierarchy queries.
+    #[must_use]
+    pub fn from_parts(
+        project: PathBuf,
+        revision: u64,
+        files: BTreeSet<PathBuf>,
+        symbols: Vec<IndexedSymbol>,
+        calls: Vec<CallEdge>,
+        types: TypeRelations,
+    ) -> Self {
+        let by_key = symbols
+            .iter()
+            .enumerate()
+            .map(|(position, symbol)| (symbol.key.clone(), position))
+            .collect();
+        let by_location = symbols
+            .iter()
+            .enumerate()
+            .map(|(position, symbol)| (location_key(symbol), position))
+            .collect();
+        Self {
+            project,
+            revision,
+            files,
+            symbols,
+            calls,
+            types,
+            by_key,
+            by_location,
+        }
+    }
+
+    /// Looks a symbol up by its key.
+    #[must_use]
+    pub fn symbol_by_key(&self, key: &SymbolKey) -> Option<&IndexedSymbol> {
+        self.by_key
+            .get(key)
+            .and_then(|position| self.symbols.get(*position))
+    }
+
+    /// Looks a symbol up by the identifier the client is pointing at.
+    #[must_use]
+    pub fn symbol_at(&self, location: &Location) -> Option<&IndexedSymbol> {
+        self.by_location
+            .get(&range_key(&location.uri, &location.range))
+            .and_then(|position| self.symbols.get(*position))
+    }
+}
+
+/// A hashable key for a document range.
+///
+/// `lsp_types::Range` and `Position` do not implement `Hash`, so the four
+/// coordinates are flattened into integers.
+type LocationKey = (String, u32, u32, u32, u32);
+
+fn range_key(uri: &lsp_types::Url, range: &Range) -> LocationKey {
+    (
+        uri.as_str().to_string(),
+        range.start.line,
+        range.start.character,
+        range.end.line,
+        range.end.character,
+    )
+}
+
+fn location_key(symbol: &IndexedSymbol) -> LocationKey {
+    range_key(&symbol.location.uri, &symbol.selection_range)
 }
 
 #[allow(deprecated)]
@@ -120,14 +207,14 @@ impl ProjectIndex {
         files.insert(normalized_path(project.join(clue::CLUE_PROJECT_FILE_NAME)));
         let calls = build_call_edges(analysis, hir, &symbols);
         let types = build_type_relations(analysis, hir, &symbols);
-        Some(Self {
+        Some(Self::from_parts(
             project,
-            revision: analysis.project_revision,
+            analysis.project_revision,
             files,
             symbols,
             calls,
             types,
-        })
+        ))
     }
 
     #[cfg(feature = "test")]
@@ -137,14 +224,14 @@ impl ProjectIndex {
         revision: u64,
         files: impl IntoIterator<Item = PathBuf>,
     ) -> Self {
-        Self {
+        Self::from_parts(
             project,
             revision,
-            files: files.into_iter().collect(),
-            symbols: Vec::new(),
-            calls: Vec::new(),
-            types: TypeRelations::default(),
-        }
+            files.into_iter().collect(),
+            Vec::new(),
+            Vec::new(),
+            TypeRelations::default(),
+        )
     }
 }
 
@@ -169,6 +256,7 @@ fn collect_unreachable_symbols(
             IndexedSymbolKind::Function,
             &item.name.0,
             format!("fun {}", item.name.0),
+            item.extent,
             item.name_range,
             item.visibility.is_public(),
         );
@@ -180,6 +268,7 @@ fn collect_unreachable_symbols(
             IndexedSymbolKind::Struct,
             &item.name.0,
             format!("struct {}", item.name.0),
+            item.extent,
             item.name_range,
             item.visibility.is_public(),
         );
@@ -191,6 +280,7 @@ fn collect_unreachable_symbols(
                 IndexedSymbolKind::Field,
                 &field.name.0,
                 format!("{}: {}", field.name.0, field.ty.display()),
+                field.ty_range,
                 field.name_range,
                 Some(&container),
                 item.visibility.is_public() && field.visibility.is_public(),
@@ -204,6 +294,7 @@ fn collect_unreachable_symbols(
             IndexedSymbolKind::Enum,
             &item.name.0,
             format!("enum {}", item.name.0),
+            item.extent,
             item.name_range,
             item.visibility.is_public(),
         );
@@ -215,6 +306,7 @@ fn collect_unreachable_symbols(
                 IndexedSymbolKind::EnumMember,
                 &variant.name.0,
                 format!("enum member {}", variant.name.0),
+                variant.name_range,
                 variant.name_range,
                 Some(&container),
                 item.visibility.is_public(),
@@ -228,6 +320,7 @@ fn collect_unreachable_symbols(
             IndexedSymbolKind::Trait,
             &item.name.0,
             format!("trait {}", item.name.0),
+            item.extent,
             item.name_range,
             item.visibility.is_public(),
         );
@@ -238,6 +331,7 @@ fn collect_unreachable_symbols(
                 IndexedSymbolKind::Function,
                 &method.name.0,
                 format!("fun {}", method.name.0),
+                method.extent,
                 method.name_range,
                 item.visibility.is_public() && method.visibility.is_public(),
             );
@@ -250,6 +344,7 @@ fn collect_unreachable_symbols(
                 IndexedSymbolKind::Function,
                 &method.name.0,
                 format!("fun {}", method.name.0),
+                method.extent,
                 method.name_range,
                 item.visibility.is_public() && method.visibility.is_public(),
             );
@@ -262,6 +357,7 @@ fn collect_unreachable_symbols(
             IndexedSymbolKind::Const,
             &item.name.0,
             format!("const {}", item.name.0),
+            item.extent,
             item.name_range,
             item.visibility.is_public(),
         );
@@ -273,6 +369,7 @@ fn collect_unreachable_symbols(
             IndexedSymbolKind::TypeAlias,
             &item.name.0,
             format!("type {}", item.name.0),
+            item.extent,
             item.name_range,
             item.visibility.is_public(),
         );
@@ -284,23 +381,26 @@ fn collect_unreachable_symbols(
             IndexedSymbolKind::Module,
             &item.name.0,
             format!("mod {}", item.name.0),
+            item.extent,
             item.name_range,
             item.visibility.is_public(),
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_unreachable_symbol(
     symbols: &mut Vec<IndexedSymbol>,
     analysis: &DocumentAnalysis,
     kind: IndexedSymbolKind,
     name: &str,
     detail: String,
-    range: rowan::TextRange,
+    extent: rowan::TextRange,
+    name_range: rowan::TextRange,
     is_public: bool,
 ) {
     push_unreachable_symbol_with_container(
-        symbols, analysis, kind, name, detail, range, None, is_public,
+        symbols, analysis, kind, name, detail, extent, name_range, None, is_public,
     );
 }
 
@@ -311,13 +411,14 @@ fn push_unreachable_symbol_with_container(
     kind: IndexedSymbolKind,
     name: &str,
     detail: String,
-    range: rowan::TextRange,
+    extent: rowan::TextRange,
+    name_range: rowan::TextRange,
     container: Option<&str>,
     is_public: bool,
 ) {
-    if symbol_key_for_range(analysis, symbols, range, kind).is_none() {
+    if symbol_key_for_range(analysis, symbols, name_range, kind).is_none() {
         push_symbol(
-            symbols, analysis, kind, name, detail, range, container, is_public,
+            symbols, analysis, kind, name, detail, extent, name_range, container, is_public,
         );
     }
 }
@@ -339,6 +440,7 @@ fn collect_items(
                     IndexedSymbolKind::Function,
                     &item.name.0,
                     format!("fun {}", item.name.0),
+                    item.extent,
                     item.name_range,
                     container,
                     item.visibility.is_public(),
@@ -353,6 +455,7 @@ fn collect_items(
                     IndexedSymbolKind::Struct,
                     &item.name.0,
                     format!("struct {}", item.name.0),
+                    item.extent,
                     item.name_range,
                     container,
                     is_public,
@@ -365,6 +468,7 @@ fn collect_items(
                         IndexedSymbolKind::Field,
                         &field.name.0,
                         format!("{}: {}", field.name.0, field.ty.display()),
+                        field.ty_range,
                         field.name_range,
                         Some(&member_container),
                         is_public && field.visibility.is_public(),
@@ -380,6 +484,7 @@ fn collect_items(
                     IndexedSymbolKind::Enum,
                     &item.name.0,
                     format!("enum {}", item.name.0),
+                    item.extent,
                     item.name_range,
                     container,
                     is_public,
@@ -392,6 +497,7 @@ fn collect_items(
                         IndexedSymbolKind::EnumMember,
                         &variant.name.0,
                         format!("enum member {}", variant.name.0),
+                        variant.name_range,
                         variant.name_range,
                         Some(&member_container),
                         is_public,
@@ -406,6 +512,7 @@ fn collect_items(
                                 IndexedSymbolKind::Field,
                                 &field.name.0,
                                 format!("{}: {}", field.name.0, field.ty.display()),
+                                field.ty_range,
                                 field.name_range,
                                 Some(&variant_container),
                                 is_public && field.visibility.is_public(),
@@ -423,6 +530,7 @@ fn collect_items(
                     IndexedSymbolKind::Trait,
                     &item.name.0,
                     format!("trait {}", item.name.0),
+                    item.extent,
                     item.name_range,
                     container,
                     is_public,
@@ -435,6 +543,7 @@ fn collect_items(
                         IndexedSymbolKind::Function,
                         &method.name.0,
                         format!("fun {}", method.name.0),
+                        method.extent,
                         method.name_range,
                         Some(&member_container),
                         is_public && method.visibility.is_public(),
@@ -448,6 +557,7 @@ fn collect_items(
                         IndexedSymbolKind::Function,
                         &method.name.0,
                         format!("fun {}", method.name.0),
+                        method.extent,
                         method.name_range,
                         Some(&member_container),
                         is_public && method.visibility.is_public(),
@@ -463,6 +573,7 @@ fn collect_items(
                     IndexedSymbolKind::Module,
                     &item.name.0,
                     format!("mod {}", item.name.0),
+                    item.extent,
                     item.name_range,
                     container,
                     is_public,
@@ -480,6 +591,7 @@ fn collect_items(
                     IndexedSymbolKind::Const,
                     &item.name.0,
                     format!("const {}", item.name.0),
+                    item.extent,
                     item.name_range,
                     container,
                     item.visibility.is_public(),
@@ -493,6 +605,7 @@ fn collect_items(
                     IndexedSymbolKind::TypeAlias,
                     &item.name.0,
                     format!("type {}", item.name.0),
+                    item.extent,
                     item.name_range,
                     container,
                     item.visibility.is_public(),
@@ -512,6 +625,7 @@ fn collect_items(
                         IndexedSymbolKind::Function,
                         &method.name.0,
                         format!("fun {}", method.name.0),
+                        method.extent,
                         method.name_range,
                         Some(&member_container),
                         method.visibility.is_public(),
@@ -723,12 +837,14 @@ fn symbol_key_for_range(
 ) -> Option<SymbolKey> {
     let mapped = analysis.source_map.as_ref()?.map_range(range)?;
     let source = normalized_path(mapped.path.to_path_buf());
+    let start = u32::from(mapped.range.start());
+    let end = u32::from(mapped.range.end());
     symbols
         .iter()
         .find(|symbol| {
             symbol.key.source == source
-                && symbol.key.start == u32::from(mapped.range.start())
-                && symbol.key.end == u32::from(mapped.range.end())
+                && symbol.name_source_range.start == start
+                && symbol.name_source_range.end == end
                 && symbol.key.kind == kind
         })
         .map(|symbol| symbol.key.clone())
@@ -746,21 +862,31 @@ fn push_symbol(
     kind: IndexedSymbolKind,
     name: &str,
     detail: String,
-    range: rowan::TextRange,
+    extent: rowan::TextRange,
+    name_range: rowan::TextRange,
     container_name: Option<&str>,
     is_public: bool,
 ) {
     let Some(source_map) = &analysis.source_map else {
         return;
     };
-    let Some(mapped) = source_map.map_range(range) else {
+    let Some(mapped) = source_map.map_range(extent) else {
         return;
     };
     let source = normalized_path(mapped.path.to_path_buf());
     let Ok(uri) = lsp_types::Url::from_file_path(&source) else {
         return;
     };
-    let Some(range) = LineIndex::new(mapped.source).range(mapped.source, mapped.range) else {
+    let index = LineIndex::new(mapped.source);
+    let Some(range) = index.range(mapped.source, mapped.range) else {
+        return;
+    };
+    // The name span is what `selectionRange` reports; it is clamped into the
+    // item extent, so a name reported outside its own item cannot happen.
+    let Some(name_mapped) = source_map.map_range(name_range) else {
+        return;
+    };
+    let Some(selection_range) = index.range(name_mapped.source, name_mapped.range) else {
         return;
     };
     symbols.push(IndexedSymbol {
@@ -777,6 +903,8 @@ fn push_symbol(
         name: name.into(),
         detail,
         location: Location { uri, range },
+        selection_range,
+        name_source_range: u32::from(name_mapped.range.start())..u32::from(name_mapped.range.end()),
         container_name: container_name.map(str::to_string),
         is_public,
     });

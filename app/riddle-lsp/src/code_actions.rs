@@ -130,12 +130,130 @@ pub fn organize_imports_action(
     source: &str,
 ) -> Option<CodeActionOrCommand> {
     let edits = organize_import_edits(source)?;
-    Some(CodeActionOrCommand::CodeAction(CodeAction {
-        title: "Organize imports".into(),
-        kind: Some(CodeActionKind::new("source.organizeImports")),
-        edit: Some(single_file_edit(uri, version, edits)),
+    Some(action_with(
+        "Organize imports",
+        CodeActionKind::new(ORGANIZE_IMPORTS_KIND),
+        single_file_edit(uri, version, edits),
+        false,
+    ))
+}
+
+/// The `source.organizeImports` kind, shared with the request filter.
+pub const ORGANIZE_IMPORTS_KIND: &str = "source.organizeImports";
+/// Adds the imports needed by names the document already uses.
+pub const ADD_MISSING_IMPORTS_KIND: &str = "source.addMissingImports";
+/// Applies every fix the server can prove is safe.
+pub const FIX_ALL_KIND: &str = "source.fixAll";
+
+/// Merges the auto-import edits of several actions into one `source.fixAll`
+/// action.
+///
+/// Only the *additional* text edits are taken: those carry the `use` lines the
+/// unresolved names need. The primary edits belong to individual quick fixes,
+/// which may overlap and would corrupt the file when applied together.
+#[must_use]
+pub fn fix_all_action(
+    uri: &Url,
+    version: Option<i32>,
+    fixes: &CodeActionResponse,
+) -> Option<CodeActionOrCommand> {
+    let mut edits = Vec::new();
+    for action in fixes {
+        let CodeActionOrCommand::CodeAction(action) = action else {
+            continue;
+        };
+        let Some(edit) = &action.edit else {
+            continue;
+        };
+        for change in edit
+            .document_changes
+            .iter()
+            .flat_map(|changes| match changes {
+                DocumentChanges::Edits(edits) => edits.iter().collect::<Vec<_>>(),
+                DocumentChanges::Operations(_) => Vec::new(),
+            })
+        {
+            if change.text_document.uri != *uri {
+                continue;
+            }
+            for edit in &change.edits {
+                if let OneOf::Left(text_edit) = edit {
+                    edits.push(text_edit.clone());
+                }
+            }
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    Some(action_with(
+        "Fix all auto-fixable problems",
+        CodeActionKind::new(FIX_ALL_KIND),
+        single_file_edit(uri, version, edits),
+        false,
+    ))
+}
+
+/// Turns the auto-import quick fixes into one `source.addMissingImports` action.
+#[must_use]
+pub fn add_missing_imports_action(
+    uri: &Url,
+    version: Option<i32>,
+    fixes: &CodeActionResponse,
+) -> Option<CodeActionOrCommand> {
+    let mut edits = Vec::new();
+    for action in fixes {
+        let CodeActionOrCommand::CodeAction(action) = action else {
+            continue;
+        };
+        if !action.title.starts_with("Import `") {
+            continue;
+        }
+        let Some(edit) = &action.edit else {
+            continue;
+        };
+        for change in edit
+            .document_changes
+            .iter()
+            .flat_map(|changes| match changes {
+                DocumentChanges::Edits(edits) => edits.iter().collect::<Vec<_>>(),
+                DocumentChanges::Operations(_) => Vec::new(),
+            })
+        {
+            if change.text_document.uri != *uri {
+                continue;
+            }
+            for edit in &change.edits {
+                if let OneOf::Left(text_edit) = edit {
+                    edits.push(text_edit.clone());
+                }
+            }
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    Some(action_with(
+        "Add missing imports",
+        CodeActionKind::new(ADD_MISSING_IMPORTS_KIND),
+        single_file_edit(uri, version, edits),
+        false,
+    ))
+}
+
+fn action_with(
+    title: &str,
+    kind: CodeActionKind,
+    edit: WorkspaceEdit,
+    preferred: bool,
+) -> CodeActionOrCommand {
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title: title.into(),
+        kind: Some(kind),
+        edit: Some(edit),
+        is_preferred: Some(preferred),
         ..CodeAction::default()
-    }))
+    })
 }
 
 /// The text edits behind [`organize_imports_action`], exposed for tests.

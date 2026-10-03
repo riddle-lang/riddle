@@ -18,6 +18,112 @@ pub type ImplId = Idx<HirImpl>;
 pub type ConstId = Idx<HirConst>;
 pub type TypeAliasId = Idx<HirTypeAlias>;
 
+/// Implements `Debug` while leaving `extent` out.
+///
+/// `extent` is the declaration's whole source range, which editor outlines need
+/// and nothing else does. Keeping it out of `Debug` keeps position out of
+/// everything derived from it: an item that moves has not changed, and ranges
+/// are read directly wherever they are actually wanted.
+macro_rules! debug_without_extent {
+    ($item:ident { $($field:ident),+ $(,)? }) => {
+        impl std::fmt::Debug for $item {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .debug_struct(stringify!($item))
+                    $(.field(stringify!($field), &self.$field))+
+                    .finish_non_exhaustive()
+            }
+        }
+    };
+}
+
+debug_without_extent!(HirFunction {
+    name,
+    name_range,
+    visibility,
+    is_unsafe,
+    generics,
+    implicit_generics,
+    const_generics,
+    generic_bounds,
+    params,
+    ret_type,
+    ret_type_range,
+    has_body,
+    attrs,
+});
+debug_without_extent!(HirStruct {
+    name,
+    visibility,
+    name_range,
+    generics,
+    const_generics,
+    generic_bounds,
+    fields,
+    attrs,
+});
+debug_without_extent!(HirEnum {
+    name,
+    name_range,
+    visibility,
+    generics,
+    const_generics,
+    generic_bounds,
+    variants,
+    attrs,
+});
+debug_without_extent!(HirTrait {
+    name,
+    name_range,
+    visibility,
+    generics,
+    generic_defaults,
+    generic_bounds,
+    supertraits,
+    methods,
+    default_methods,
+    type_aliases,
+    attrs,
+});
+debug_without_extent!(HirImpl {
+    self_ty,
+    self_ty_range,
+    trait_ty,
+    trait_ty_range,
+    callable,
+    generics,
+    const_generics,
+    generic_bounds,
+    methods,
+    consts,
+    type_aliases,
+    attrs,
+});
+debug_without_extent!(HirConst {
+    name,
+    name_range,
+    visibility,
+    ty,
+    ty_range,
+    has_value,
+    attrs,
+});
+debug_without_extent!(HirTypeAlias {
+    name,
+    name_range,
+    visibility,
+    ty,
+    ty_range,
+    attrs,
+});
+debug_without_extent!(HirModule {
+    name,
+    name_range,
+    visibility,
+    items,
+    attrs,
+});
+
 #[derive(Debug)]
 pub struct ItemTree {
     pub functions: Arena<HirFunction>,
@@ -82,10 +188,12 @@ pub struct HirInternalAttr {
     pub target: InternalAttrTarget,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirFunction {
     pub name: Name,
     pub name_range: TextRange,
+    /// The whole declaration, for editor outlines that need more than the name.
+    pub extent: TextRange,
     pub visibility: Visibility,
     pub is_unsafe: bool,
     pub generics: Vec<Name>,
@@ -116,11 +224,31 @@ pub struct HirCallableSignature {
     pub ret: Box<HirTypeRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct HirAssocTypeConstraint {
     pub name: Name,
     pub ty: HirTypeRef,
     pub range: TextRange,
+}
+
+/// Identity is the name and the type; `range` is only where it was written.
+///
+/// A `dyn Trait<Assoc = Ty>` is the same type wherever it appears, and hashing
+/// the range into it moved the type-context fingerprint whenever the source
+/// around it changed length.
+impl PartialEq for HirAssocTypeConstraint {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.ty == other.ty
+    }
+}
+
+impl Eq for HirAssocTypeConstraint {}
+
+impl Hash for HirAssocTypeConstraint {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.ty.hash(state);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -239,11 +367,12 @@ fn hir_callable_mentions_bare_self(signature: &HirCallableSignature) -> bool {
         || hir_type_mentions_bare_self(&signature.ret)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirStruct {
     pub name: Name,
     pub visibility: Visibility,
     pub name_range: TextRange,
+    pub extent: TextRange,
     pub generics: Vec<Name>,
     pub const_generics: Vec<Name>,
     pub generic_bounds: Vec<HirGenericBound>,
@@ -264,10 +393,11 @@ pub struct HirStructField {
     pub attrs: Vec<HirAttr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirEnum {
     pub name: Name,
     pub name_range: TextRange,
+    pub extent: TextRange,
     pub visibility: Visibility,
     pub generics: Vec<Name>,
     pub const_generics: Vec<Name>,
@@ -295,10 +425,11 @@ pub enum HirVariantKind {
     Struct(Vec<HirStructField>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirTrait {
     pub name: Name,
     pub name_range: TextRange,
+    pub extent: TextRange,
     pub visibility: Visibility,
     pub generics: Vec<Name>,
     pub generic_defaults: Vec<Option<HirTypeRef>>,
@@ -310,8 +441,10 @@ pub struct HirTrait {
     pub attrs: Vec<HirAttr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirImpl {
+    /// The whole `impl` block.
+    pub extent: TextRange,
     /// The implementing type's path (`T` in `impl T` / `impl Trait for T`).
     pub self_ty: HirTypeRef,
     pub self_ty_range: TextRange,
@@ -328,10 +461,11 @@ pub struct HirImpl {
     pub attrs: Vec<HirAttr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirConst {
     pub name: Name,
     pub name_range: TextRange,
+    pub extent: TextRange,
     pub visibility: Visibility,
     pub ty: HirTypeRef,
     pub ty_range: TextRange,
@@ -339,20 +473,22 @@ pub struct HirConst {
     pub attrs: Vec<HirAttr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirTypeAlias {
     pub name: Name,
     pub name_range: TextRange,
+    pub extent: TextRange,
     pub visibility: Visibility,
     pub ty: Option<HirTypeRef>,
     pub ty_range: Option<TextRange>,
     pub attrs: Vec<HirAttr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirModule {
     pub name: Name,
     pub name_range: TextRange,
+    pub extent: TextRange,
     pub visibility: Visibility,
     /// `mod foo;` → None; `mod foo { ... }` → Some(items)
     pub items: Option<Vec<TopLevelItem>>,
@@ -422,7 +558,7 @@ pub enum PathAnchor {
     Absolute, // ::foo
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub enum HirTypeRef {
     Named(HirPath),
     Never,
@@ -450,6 +586,128 @@ pub enum HirTypeRef {
     },
     Unknown,
     Error,
+}
+
+/// Compares two type references by what they *mean*, not where they were
+/// written.
+///
+/// `trait_range` records where an `impl Trait` or `dyn Trait` was spelled and
+/// has no bearing on the type. Including it made the type identity move with
+/// the surrounding source: the incremental checker hashes signatures into its
+/// type-context fingerprint, and the pipeline bundles the user's code *before*
+/// the standard library, so editing one user function byte-shifted every
+/// standard-library `impl Trait` and invalidated all ~827 cached bodies.
+impl PartialEq for HirTypeRef {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Named(left), Self::Named(right)) => left == right,
+            (Self::Never, Self::Never) | (Self::Unknown, Self::Unknown) => true,
+            (Self::Error, Self::Error) => true,
+            (Self::Ref(left, left_mut), Self::Ref(right, right_mut)) => {
+                left == right && left_mut == right_mut
+            }
+            (
+                Self::Ptr {
+                    mutable: left_mut,
+                    inner: left,
+                },
+                Self::Ptr {
+                    mutable: right_mut,
+                    inner: right,
+                },
+            ) => left == right && left_mut == right_mut,
+            (Self::Tuple(left), Self::Tuple(right)) => left == right,
+            (Self::Slice(left), Self::Slice(right)) => left == right,
+            (Self::Array(left, left_arg), Self::Array(right, right_arg)) => {
+                left == right && left_arg == right_arg
+            }
+            (Self::Const(left), Self::Const(right)) => left == right,
+            (
+                Self::ImplTrait {
+                    trait_ty: left_ty,
+                    callable: left_callable,
+                    hidden: left_hidden,
+                    ..
+                },
+                Self::ImplTrait {
+                    trait_ty: right_ty,
+                    callable: right_callable,
+                    hidden: right_hidden,
+                    ..
+                },
+            ) => {
+                left_ty == right_ty
+                    && left_callable == right_callable
+                    && left_hidden == right_hidden
+            }
+            (
+                Self::DynTrait {
+                    trait_ty: left_ty,
+                    callable: left_callable,
+                    assoc_constraints: left_constraints,
+                    ..
+                },
+                Self::DynTrait {
+                    trait_ty: right_ty,
+                    callable: right_callable,
+                    assoc_constraints: right_constraints,
+                    ..
+                },
+            ) => {
+                left_ty == right_ty
+                    && left_callable == right_callable
+                    && left_constraints == right_constraints
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for HirTypeRef {}
+
+impl Hash for HirTypeRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Named(path) => path.hash(state),
+            Self::Never | Self::Unknown | Self::Error => {}
+            Self::Ref(inner, mutable) => {
+                inner.hash(state);
+                mutable.hash(state);
+            }
+            Self::Ptr { mutable, inner } => {
+                mutable.hash(state);
+                inner.hash(state);
+            }
+            Self::Tuple(types) => types.hash(state),
+            Self::Slice(inner) => inner.hash(state),
+            Self::Array(inner, arg) => {
+                inner.hash(state);
+                arg.hash(state);
+            }
+            Self::Const(arg) => arg.hash(state),
+            Self::ImplTrait {
+                trait_ty,
+                callable,
+                hidden,
+                ..
+            } => {
+                trait_ty.hash(state);
+                callable.hash(state);
+                hidden.hash(state);
+            }
+            Self::DynTrait {
+                trait_ty,
+                callable,
+                assoc_constraints,
+                ..
+            } => {
+                trait_ty.hash(state);
+                callable.hash(state);
+                assoc_constraints.hash(state);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

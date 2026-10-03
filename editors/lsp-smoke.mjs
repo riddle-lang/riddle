@@ -138,9 +138,19 @@ try {
   const initialized = await read((message) => message.id === 1);
   assert.equal(initialized.result.serverInfo.name, 'riddle-lsp');
   assert.equal(initialized.result.capabilities.positionEncoding, 'utf-16');
-  assert.equal(initialized.result.capabilities.textDocumentSync, 2);
-  assert.equal(initialized.result.capabilities.codeActionProvider, true);
+  assert.deepEqual(initialized.result.capabilities.textDocumentSync, {
+    openClose: true,
+    change: 2,
+    save: true,
+  });
+  assert.deepEqual(initialized.result.capabilities.codeActionProvider.codeActionKinds, [
+    'quickfix',
+    'source.organizeImports',
+    'source.addMissingImports',
+    'source.fixAll',
+  ]);
   assert.equal(initialized.result.capabilities.documentFormattingProvider, true);
+  assert.equal(initialized.result.capabilities.documentRangeFormattingProvider, true);
   assert.equal(initialized.result.capabilities.documentHighlightProvider, true);
   assert.equal(initialized.result.capabilities.documentSymbolProvider, true);
   assert.equal(initialized.result.capabilities.workspaceSymbolProvider, true);
@@ -159,7 +169,13 @@ try {
   assert.equal(initialized.result.capabilities.inlayHintProvider, true);
   assert.equal(initialized.result.capabilities.selectionRangeProvider, true);
   assert.equal(initialized.result.capabilities.semanticTokensProvider.full.delta, true);
+  assert.equal(initialized.result.capabilities.semanticTokensProvider.range, true);
+  assert.equal(initialized.result.capabilities.diagnosticProvider.workspaceDiagnostics, true);
   assert.equal(initialized.result.capabilities.workspace.workspaceFolders.supported, true);
+  assert(
+    initialized.result.capabilities.workspace.fileOperations.willRename,
+    'the server must announce willRename so a module rename can rewrite `use` paths',
+  );
 
   send({ jsonrpc: '2.0', method: 'initialized', params: {} });
   const watcherRegistration = await read(
@@ -172,7 +188,7 @@ try {
   assert(watchedFiles);
   assert.deepEqual(
     new Set(watchedFiles.registerOptions.watchers.map((watcher) => watcher.globPattern)),
-    new Set(['**/*.rid', '**/Clue.toml']),
+    new Set(['**/*.rid', '**/Clue.toml', '**/Clue.lock']),
   );
   send({ jsonrpc: '2.0', id: watcherRegistration.id, result: null });
   const typeHierarchyRegistration = await read(
@@ -605,6 +621,53 @@ try {
   assert(manifestHover.result);
   assert(manifestHover.result.contents.value.includes('**package.name**'));
 
+  // A nested dependency table has a fixed key schema even though its name is
+  // user-chosen, so it must offer completions.
+  const nestedManifestText =
+    '[package]\nname = "smoke"\n\n[dependencies.helper]\n\n';
+  const nestedManifestUri = pathToFileURL(join(smokeRoot, 'nested-manifest', 'Clue.toml')).href;
+  mkdirSync(join(smokeRoot, 'nested-manifest'), { recursive: true });
+  writeFileSync(join(smokeRoot, 'nested-manifest', 'Clue.toml'), nestedManifestText);
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didOpen',
+    params: {
+      textDocument: {
+        uri: nestedManifestUri,
+        languageId: 'clue',
+        version: 1,
+        text: nestedManifestText,
+      },
+    },
+  });
+  await read(
+    (message) =>
+      message.method === 'textDocument/publishDiagnostics' &&
+      message.params.uri === nestedManifestUri &&
+      message.params.version === 1,
+  );
+  send({
+    jsonrpc: '2.0',
+    id: 148,
+    method: 'textDocument/completion',
+    params: {
+      textDocument: { uri: nestedManifestUri },
+      position: { line: 4, character: 0 },
+    },
+  });
+  const nestedCompletions = await read((message) => message.id === 148);
+  for (const key of ['path', 'version', 'git', 'optional']) {
+    assert(
+      nestedCompletions.result.some((item) => item.label === key),
+      `expected [dependencies.<name>] to complete \`${key}\``,
+    );
+  }
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didClose',
+    params: { textDocument: { uri: nestedManifestUri } },
+  });
+
   const lastBurstVersion = 14;
   for (let version = 3; version <= lastBurstVersion; version += 1) {
     send({
@@ -689,6 +752,27 @@ try {
         item.textEdit?.range?.end?.character === completionText.indexOf('c.i') + 3 &&
         item.kind === 2,
     ),
+  );
+
+  // A second request, after the diagnostics pass for this document has settled.
+  // The first member completion above is dominated by whichever whole-project
+  // analysis is already in flight; this measures the request itself, which is
+  // what a user feels while typing once the file has been open for a moment.
+  const steadyCompletionStarted = performance.now();
+  send({
+    jsonrpc: '2.0',
+    id: 60,
+    method: 'textDocument/completion',
+    params: {
+      textDocument: { uri: completionUri },
+      position: { line: 0, character: completionText.indexOf('c.i') + 3 },
+    },
+  });
+  const steadyCompletions = await read((message) => message.id === 60);
+  const steadyCompletionMs = performance.now() - steadyCompletionStarted;
+  assert(
+    steadyCompletions.result.items.some((item) => item.label === 'is_empty'),
+    'a repeated completion must still return the same items',
   );
 
   const memberDot = completionText.indexOf('c.i') + 1;
@@ -1061,6 +1145,22 @@ try {
   const invalidRename = await read((message) => message.id === 32);
   assert.equal(invalidRename.error.code, -32602);
 
+  // A rename the server will not perform has to say so. Returning `null` left
+  // the user with an action that silently did nothing.
+  send({
+    jsonrpc: '2.0',
+    id: 132,
+    method: 'textDocument/rename',
+    params: {
+      textDocument: { uri: navigationUri },
+      position: { line: 0, character: 0 },
+      newName: 'renamed',
+    },
+  });
+  const unnameableRename = await read((message) => message.id === 132);
+  assert.equal(unnameableRename.error.code, -32602);
+  assert.equal(unnameableRename.result, undefined);
+
   const aliasTargetCharacter = navigationText.split('\n')[9].lastIndexOf('Foo');
   send({
     jsonrpc: '2.0',
@@ -1110,6 +1210,22 @@ try {
   const documentSymbols = await read((message) => message.id === 42);
   assert(documentSymbols.result.some((symbol) => symbol.name === 'Show'));
   assert(documentSymbols.result.some((symbol) => symbol.name === 'Value'));
+  // Impl blocks used to be dropped from the outline, so their methods were
+  // reachable through workspace/symbol but invisible in the file's own symbols.
+  const implSymbol = documentSymbols.result.find((symbol) => symbol.name === 'Value' && symbol.detail === 'Show');
+  assert(implSymbol, 'the outline must contain the impl block for `Show for Value`');
+  assert(
+    implSymbol.children.some((child) => child.name === 'show'),
+    'an impl block must list its methods as children',
+  );
+  // `range` covers the whole item while `selectionRange` covers just the name.
+  assert(
+    implSymbol.range.start.line < implSymbol.selectionRange.start.line ||
+      implSymbol.range.start.character < implSymbol.selectionRange.start.character ||
+      implSymbol.range.end.line > implSymbol.selectionRange.end.line ||
+      implSymbol.range.end.character > implSymbol.selectionRange.end.character,
+    'an item symbol must be wider than its name',
+  );
 
   send({
     jsonrpc: '2.0',
@@ -1290,6 +1406,86 @@ try {
   );
   assert.deepEqual(completionClosed.params.diagnostics, []);
 
+  // A change the server cannot map onto its buffer must be reported, never
+  // rendered as "this file is clean". The document stays open and analysable
+  // afterwards, so a later valid edit restores real diagnostics.
+  const desyncUri = pathToFileURL(join(smokeRoot, 'riddle-lsp-desync.rid')).href;
+  const desyncText = 'fun main() {\n    let value = 1;\n}\n';
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didOpen',
+    params: {
+      textDocument: {
+        uri: desyncUri,
+        languageId: 'riddle',
+        version: 1,
+        text: desyncText,
+      },
+    },
+  });
+  await read(
+    (message) =>
+      message.method === 'textDocument/publishDiagnostics' &&
+      message.params.uri === desyncUri &&
+      message.params.version === 1,
+  );
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didChange',
+    params: {
+      textDocument: { uri: desyncUri, version: 2 },
+      contentChanges: [
+        {
+          range: { start: { line: 99, character: 0 }, end: { line: 99, character: 1 } },
+          rangeLength: 1,
+          text: 'x',
+        },
+      ],
+    },
+  });
+  const desynced = await read(
+    (message) =>
+      message.method === 'textDocument/publishDiagnostics' &&
+      message.params.uri === desyncUri &&
+      message.params.version === 2,
+  );
+  assert(
+    desynced.params.diagnostics.length > 0,
+    'an unanalysable buffer must not be published as clean',
+  );
+  assert(
+    desynced.params.diagnostics.some((diagnostic) => diagnostic.code === 'LSP0001'),
+    'the out-of-sync document must carry the LSP0001 diagnostic',
+  );
+  // Recovering with a full-text change clears the state.
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didChange',
+    params: {
+      textDocument: { uri: desyncUri, version: 3 },
+      contentChanges: [{ text: 'fun main() {}\n' }],
+    },
+  });
+  const recovered = await read(
+    (message) =>
+      message.method === 'textDocument/publishDiagnostics' &&
+      message.params.uri === desyncUri &&
+      message.params.version === 3,
+  );
+  assert.deepEqual(recovered.params.diagnostics, []);
+
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didClose',
+    params: { textDocument: { uri: desyncUri } },
+  });
+  await read(
+    (message) =>
+      message.method === 'textDocument/publishDiagnostics' &&
+      message.params.uri === desyncUri &&
+      message.params.version == null,
+  );
+
   send({
     jsonrpc: '2.0',
     method: 'textDocument/didClose',
@@ -1329,13 +1525,51 @@ try {
   );
   assert.deepEqual(untitledClosed.params.diagnostics, []);
 
+  // A buffer that is barely typed yet must still get an answer. The completion
+  // path analyses the marked source and then, when the marker is not resolved
+  // as a scope reference — the normal case for `f` — the unmodified source in a
+  // second pass. Those two passes used to lock the same session, so the second
+  // waited on the first forever and the request never returned. The editor sat
+  // on it and the server stopped answering every later request too.
+  const bareUri = pathToFileURL(join(smokeRoot, 'riddle-lsp-bare.rid')).href;
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didOpen',
+    params: {
+      textDocument: { uri: bareUri, languageId: 'riddle', version: 1, text: 'f' },
+    },
+  });
+  const bareStarted = Date.now();
+  send({
+    jsonrpc: '2.0',
+    id: 9,
+    method: 'textDocument/completion',
+    params: { textDocument: { uri: bareUri }, position: { line: 0, character: 1 } },
+  });
+  const bareCompletion = await read((message) => message.id === 9, 20_000);
+  const bareCompletionMs = Date.now() - bareStarted;
+  assert.equal(
+    bareCompletion.error,
+    undefined,
+    `completion on a barely-typed buffer failed: ${JSON.stringify(bareCompletion.error)}`,
+  );
+  // Answering at all is the point; a buffer this incomplete may offer little.
+  const bareItems = Array.isArray(bareCompletion.result)
+    ? bareCompletion.result
+    : (bareCompletion.result?.items ?? []);
+  send({
+    jsonrpc: '2.0',
+    method: 'textDocument/didClose',
+    params: { textDocument: { uri: bareUri } },
+  });
+
   send({ jsonrpc: '2.0', id: 10, method: 'shutdown' });
   const shutdown = await read((message) => message.id === 10);
   assert.equal(shutdown.error, undefined);
   assert.equal(shutdown.result, null);
   send({ jsonrpc: '2.0', method: 'exit' });
   console.log(
-    `riddle-lsp stdio handshake passed (member ${memberCompletionMs.toFixed(1)} ms, general ${generalCompletionMs.toFixed(1)} ms)`,
+    `riddle-lsp stdio handshake passed (first member ${memberCompletionMs.toFixed(1)} ms, steady member ${steadyCompletionMs.toFixed(1)} ms, general ${generalCompletionMs.toFixed(1)} ms, bare buffer ${bareCompletionMs} ms / ${bareItems.length} items)`,
   );
 } finally {
   server.stdin.end();

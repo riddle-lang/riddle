@@ -656,15 +656,44 @@ pub struct ProjectSession {
     cached: Option<CachedProject>,
     expanded: Option<CachedExpansion>,
     analysis: Option<CachedAnalysis>,
+    /// Analyses keyed by the exact inputs that produced them.
+    ///
+    /// `analysis` is a single slot invalidated by every overlay change, so a
+    /// caller that alternates between two versions of the same file — the
+    /// language server does exactly this when it analyses a completion marker
+    /// and then the repaired source — recompiles the whole project on every
+    /// switch. This keeps a few recent results so those alternations hit.
+    recent_analyses: Vec<CachedAnalysis>,
     proc_macros: Option<CachedProcMacroProvider>,
     revision: u64,
 }
 
+impl ProjectSession {
+    /// Reuse counters from this session's most recent check.
+    ///
+    /// An editor edit should re-check the one function that changed; if this
+    /// reports hundreds of checked bodies, the incremental state stopped
+    /// matching and the whole standard library is being re-analysed.
+    #[must_use]
+    pub const fn last_check_stats(&self) -> type_checker::IncrementalStats {
+        self.checker.last_stats()
+    }
+}
+
+/// How many distinct input fingerprints a session remembers.
+///
+/// Three covers the shapes the language server produces in a row: the marked
+/// source, its semicolon-repaired variant, and the unmodified buffer.
+const RECENT_ANALYSIS_LIMIT: usize = 3;
+
 struct CachedProject {
     package: project::LoadedPackage,
     overlays: BTreeMap<PathBuf, String>,
-    disk: BTreeMap<PathBuf, Option<(u64, Option<SystemTime>)>>,
+    disk: DiskStamps,
 }
+
+/// Size and modification time per watched file, as recorded by a load.
+type DiskStamps = BTreeMap<PathBuf, Option<(u64, Option<SystemTime>)>>;
 
 struct CachedExpansion {
     revision: u64,
@@ -674,6 +703,8 @@ struct CachedExpansion {
 
 struct CachedAnalysis {
     revision: u64,
+    /// Hash of the package path, compile options and every relevant overlay.
+    fingerprint: u64,
     options: riddlec::pipeline::CompileOptions,
     depth: ProjectAnalysisDepth,
     analysis: ProjectAnalysis,
@@ -698,12 +729,16 @@ impl ProjectSession {
         overlays: &HashMap<PathBuf, String, S>,
     ) -> anyhow::Result<project::LoadedPackage> {
         let normalized_overlays = normalized_overlays(overlays);
+        let tracing = phase_timing_enabled();
         let topology_changed = if let Some(cached) = &self.cached {
             let relevant_overlays =
                 relevant_overlays(&normalized_overlays, &cached.package.watched_files);
             if relevant_overlays == cached.overlays
                 && file_stamps(&cached.package.watched_files, &normalized_overlays) == cached.disk
             {
+                if tracing {
+                    eprintln!("[proj] load: unchanged, reusing package");
+                }
                 return Ok(cached.package.clone());
             }
             relevant_overlays.keys().ne(cached.overlays.keys())
@@ -711,6 +746,13 @@ impl ProjectSession {
             false
         };
 
+        if tracing {
+            eprintln!(
+                "[proj] load: reloading (topology_changed={topology_changed}), revision {} -> {}",
+                self.revision,
+                self.revision.wrapping_add(1)
+            );
+        }
         let package = project::load_with_overlays(path, overlays)?;
         if topology_changed {
             self.checker = riddlec::pipeline::CheckSession::default();
@@ -737,6 +779,44 @@ impl ProjectSession {
         })
     }
 
+    /// Looks up an analysis whose inputs were byte-identical to these ones.
+    fn cached_analysis_for(
+        &self,
+        fingerprint: u64,
+        options: riddlec::pipeline::CompileOptions,
+        depth: ProjectAnalysisDepth,
+    ) -> Option<ProjectAnalysis> {
+        self.recent_analyses
+            .iter()
+            .find(|cached| {
+                cached.fingerprint == fingerprint
+                    && cached.options == options
+                    && cached.depth >= depth
+            })
+            .map(|cached| cached.analysis.clone())
+    }
+
+    fn remember_analysis(
+        &mut self,
+        fingerprint: u64,
+        options: riddlec::pipeline::CompileOptions,
+        depth: ProjectAnalysisDepth,
+        analysis: &ProjectAnalysis,
+    ) {
+        self.recent_analyses
+            .retain(|cached| !(cached.fingerprint == fingerprint && cached.options == options));
+        self.recent_analyses.push(CachedAnalysis {
+            revision: self.revision,
+            fingerprint,
+            options,
+            depth,
+            analysis: analysis.clone(),
+        });
+        if self.recent_analyses.len() > RECENT_ANALYSIS_LIMIT {
+            self.recent_analyses.remove(0);
+        }
+    }
+
     fn cache_analysis(
         &mut self,
         options: riddlec::pipeline::CompileOptions,
@@ -745,6 +825,9 @@ impl ProjectSession {
     ) {
         self.analysis = Some(CachedAnalysis {
             revision: self.revision,
+            // The single slot is only consulted when the revision still
+            // matches, so its fingerprint is never compared.
+            fingerprint: 0,
             options,
             depth,
             analysis,
@@ -858,6 +941,13 @@ fn file_stamps(
             (path.clone(), stamp)
         })
         .collect()
+}
+
+/// Whether the pipeline's phase tracing is on, under `RIDDLEC_PHASE_TIMING`.
+///
+/// Read once per call so the tracing costs nothing on the hot path.
+fn phase_timing_enabled() -> bool {
+    std::env::var_os("RIDDLEC_PHASE_TIMING").is_some()
 }
 
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
@@ -1029,6 +1119,15 @@ fn analyze_project_with_session_cancellable<S: BuildHasher>(
     if let Some(analysis) = session.cached_analysis(options, depth) {
         return Ok(Some(analysis));
     }
+    // The single-slot cache above is invalidated by any overlay change. This
+    // one survives an alternating input pattern, which is what the language
+    // server produces when it analyses a completion marker and the repaired
+    // source in the same keystroke.
+    let disk = session.cached.as_ref().map(|cached| cached.disk.clone());
+    let fingerprint = analysis_fingerprint(path, overlays, disk.as_ref(), options);
+    if let Some(analysis) = session.cached_analysis_for(fingerprint, options, depth) {
+        return Ok(Some(analysis));
+    }
     let (package, macro_analysis) = session.expand(package)?;
     if cancelled() {
         return Ok(None);
@@ -1115,7 +1214,44 @@ fn analyze_project_with_session_cancellable<S: BuildHasher>(
         library_types: package.library_types,
     };
     session.cache_analysis(options, depth, analysis.clone());
+    session.remember_analysis(fingerprint, options, depth, &analysis);
     Ok(Some(analysis))
+}
+
+/// Identity of the inputs an analysis was produced from.
+///
+/// Hashes the caller's overlays *and* the file stamps the session just checked,
+/// so an edit to a module that is not open in the editor (visible only as a
+/// changed mtime) invalidates the entry too. Anything the language server
+/// cannot observe without loading the package would be unsafe to cache on.
+fn analysis_fingerprint<S: BuildHasher>(
+    path: &Path,
+    overlays: &HashMap<PathBuf, String, S>,
+    disk: Option<&DiskStamps>,
+    options: riddlec::pipeline::CompileOptions,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::Hash as _;
+    path.hash(&mut hasher);
+    options.use_std.hash(&mut hasher);
+    let mut entries = overlays
+        .iter()
+        .map(|(path, source)| (normalized_path(path.as_path()), source))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.len().hash(&mut hasher);
+    for (path, source) in entries {
+        path.hash(&mut hasher);
+        source.hash(&mut hasher);
+    }
+    if let Some(disk) = disk {
+        disk.len().hash(&mut hasher);
+        for (path, stamp) in disk {
+            path.hash(&mut hasher);
+            stamp.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn analyze_project_impl<S: BuildHasher>(

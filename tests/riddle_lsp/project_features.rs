@@ -18,13 +18,7 @@ fn project_semantic_tokens_resolve_cross_module_functions() {
     )
     .unwrap();
     let uri = lsp_types::Url::from_file_path(&main).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: main_text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(main_text, Some(1)))]);
     let sessions = AnalysisSessions::default();
 
     let tokens =
@@ -100,13 +94,7 @@ fun main() -> i32 { answer!() + plain() }
     let main_path = root.join("app/src/main.rid");
     fs::write(&main_path, source).unwrap();
     let uri = lsp_types::Url::from_file_path(&main_path).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: source.into(),
-            version: Some(3),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(source, Some(3)))]);
     let sessions = AnalysisSessions::default();
     let options = CompileOptions { use_std: false };
 
@@ -265,20 +253,13 @@ fn assert_imported_macro_completion(uri: &lsp_types::Url, source: &str, options:
     let incomplete = source
         .replace("#[derive(Inspect)]", "#[derive(Ins)]")
         .replace("answer!()", "ans");
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: incomplete.clone(),
-            version: Some(4),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(incomplete.clone(), Some(4)))]);
     let cursor = incomplete.find("Ins)]").unwrap() + "Ins".len();
     let items = completion_items_for_document(
         uri,
         &docs,
         position(&incomplete, cursor),
         options,
-        &AnalysisSessions::default(),
         &AnalysisSessions::default(),
         || false,
     )
@@ -295,7 +276,6 @@ fn assert_imported_macro_completion(uri: &lsp_types::Url, source: &str, options:
         &docs,
         position(&incomplete, cursor),
         options,
-        &AnalysisSessions::default(),
         &AnalysisSessions::default(),
         || false,
     )
@@ -339,13 +319,7 @@ fun main() -> i32 {
     let main_path = root.join("src/main.rid");
     fs::write(&main_path, source).unwrap();
     let uri = lsp_types::Url::from_file_path(&main_path).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: source.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(source, Some(1)))]);
     let sessions = AnalysisSessions::default();
 
     let tokens =
@@ -433,13 +407,7 @@ fn project_inlay_hints_infer_cross_module_return_types() {
     )
     .unwrap();
     let uri = lsp_types::Url::from_file_path(&main).unwrap();
-    let docs = HashMap::from([(
-        uri.clone(),
-        Document {
-            text: main_text.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(uri.clone(), Document::new(main_text, Some(1)))]);
     let sessions = AnalysisSessions::default();
 
     let hints = inlay_hints_for_document(

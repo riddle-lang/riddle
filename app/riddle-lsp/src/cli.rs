@@ -6,6 +6,7 @@ use riddlec::pipeline::CompileOptions;
 pub struct Options {
     pub compile_options: CompileOptions,
     pub completion_delay: Duration,
+    pub trace_latency: bool,
 }
 
 #[derive(Parser)]
@@ -19,10 +20,16 @@ struct CliArgs {
     #[arg(
         long = "completion-delay-ms",
         value_name = "MS",
-        default_value_t = 0,
-        help = "Delay completion requests by the given number of milliseconds"
+        default_value_t = 40,
+        help = "Coalesce completion requests arriving within this window"
     )]
     completion_delay_ms: u64,
+    #[arg(
+        long = "trace-latency",
+        env = "RIDDLE_LSP_TRACE_LATENCY",
+        help = "Print per-phase latency (formatting, folding, analysis) to stderr"
+    )]
+    trace_latency: bool,
 }
 
 /// Parses command-line options for the language server.
@@ -37,5 +44,6 @@ pub fn parse_args(args: &[String]) -> Result<Options, clap::Error> {
             use_std: !args.no_std,
         },
         completion_delay: Duration::from_millis(args.completion_delay_ms),
+        trace_latency: args.trace_latency,
     })
 }

@@ -75,6 +75,57 @@ fn project_session_reuses_analysis_for_unchanged_inputs() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn a_one_character_edit_rechecks_only_the_edited_body() {
+    // The editor's warm path: a project is already analysed, the user types one
+    // character, and the project is checked again. Only the function that
+    // changed may be re-type-checked — everything else, above all the standard
+    // library's ~827 bodies, has to come from the incremental cache.
+    let root = temp_root("keystroke-reuse");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Clue.toml"),
+        "[package]\nname = \"keystroke-reuse\"\n\n[dependencies]\n",
+    )
+    .unwrap();
+    let main = root.join("src/main.rid");
+    fs::write(&main, "fun main() -> i32 { 1 }\n").unwrap();
+
+    let mut session = ProjectSession::default();
+    let mut overlays = HashMap::from([(main.clone(), "fun main() -> i32 { 1 }\n".to_string())]);
+    clue::check_project_with_session(&root, &overlays, CompileOptions::default(), &mut session)
+        .unwrap();
+
+    let cold = session.last_check_stats();
+    assert!(
+        cold.checked_bodies > 100,
+        "the first check has to build the standard library's cache, got {cold:?}"
+    );
+
+    // One character longer, inside the body only.
+    overlays.insert(main, "fun main() -> i32 { 100 }\n".to_string());
+    clue::check_project_with_session(&root, &overlays, CompileOptions::default(), &mut session)
+        .unwrap();
+
+    let warm = session.last_check_stats();
+    assert_eq!(
+        warm.checked_bodies, 1,
+        "one edited body must re-check one body, not {}: {warm:?}",
+        warm.checked_bodies
+    );
+    assert_eq!(
+        warm.missed_context, 0,
+        "the type context must not move: {warm:?}"
+    );
+    assert_eq!(
+        warm.missed_body, 1,
+        "only the edited body changed: {warm:?}"
+    );
+    assert!(!warm.rebuilt_globals, "globals must be reused: {warm:?}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
 fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "clue-{name}-{}-{}",

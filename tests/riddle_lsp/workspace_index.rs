@@ -48,13 +48,7 @@ fn project_index_contains_unopened_module_symbols_and_files() {
     let util_path = root.join("src/util.rid");
     fs::write(&util_path, "pub fun helper() {}\n").unwrap();
     let main_uri = lsp_types::Url::from_file_path(fs::canonicalize(&main_path).unwrap()).unwrap();
-    let docs = HashMap::from([(
-        main_uri.clone(),
-        Document {
-            text: main_source.into(),
-            version: Some(1),
-        },
-    )]);
+    let docs = HashMap::from([(main_uri.clone(), Document::new(main_source, Some(1)))]);
 
     let index = project_index_for_document(
         &main_uri,

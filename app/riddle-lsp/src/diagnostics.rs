@@ -30,6 +30,30 @@ pub struct PublishedDiagnostics {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Code reported when the server's buffer for a document cannot be trusted.
+pub const OUT_OF_SYNC_CODE: &str = "LSP0001";
+
+/// The single diagnostic published for a document whose buffered text could
+/// not be reconstructed from the editor's changes.
+///
+/// The point is to be loud: the alternative — publishing nothing — renders as
+/// "this file has no problems", which is indistinguishable from a clean file.
+fn out_of_sync_diagnostic() -> Diagnostic {
+    Diagnostic {
+        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(NumberOrString::String(OUT_OF_SYNC_CODE.into())),
+        code_description: None,
+        source: Some("riddle".into()),
+        message: "this file is out of sync with the editor, so it was not analysed; \
+                  reopen it or undo recent edits to restore diagnostics"
+            .into(),
+        related_information: None,
+        tags: None,
+        data: None,
+    }
+}
+
 struct ResolvedLabel {
     uri: Url,
     range: Range,
@@ -42,12 +66,64 @@ pub struct DiagnosticSessions {
     analysis: Arc<AnalysisSessions>,
 }
 
+/// Whether session-lifecycle tracing is on, under `RIDDLEC_PHASE_TIMING`.
+///
+/// Read once per call rather than per event, so the tracing costs nothing on
+/// the path that runs for every document.
+fn tracing_sessions() -> bool {
+    std::env::var_os("RIDDLEC_PHASE_TIMING").is_some()
+}
+
+/// Logs session-lifecycle events when `RIDDLEC_PHASE_TIMING` is set.
+///
+/// Which session object a request lands on decides whether the standard
+/// library's ~827 checked bodies are reused (about 20 ms) or recomputed (about
+/// 700 ms), and nothing else in the system reveals when that object is dropped.
+fn trace_sessions(event: &str, key: impl std::fmt::Display) {
+    if tracing_sessions() {
+        let name = key.to_string();
+        let name = name.rsplit('/').next().unwrap_or(&name);
+        eprintln!("[session] {event:<28} {name}");
+    }
+}
+
 impl DiagnosticSessions {
     pub(crate) fn new(analysis: Arc<AnalysisSessions>) -> Self {
         Self {
             analysis,
             ..Self::default()
         }
+    }
+
+    /// How many times the session for `uri` has run its checker, if it has one.
+    ///
+    /// Used by tests to distinguish a session that is being reused from one
+    /// that is quietly recreated; a process-wide counter would be shared with
+    /// every other test running in parallel.
+    #[cfg(feature = "test")]
+    #[must_use]
+    pub fn standalone_checks(&self, uri: &Url) -> Option<usize> {
+        self.standalone.get(uri).map(|session| session.checks)
+    }
+
+    /// Returns the session for a standalone document, creating it if needed.
+    fn standalone_session(&mut self, uri: &Url) -> &mut StandaloneDiagnosticSession {
+        let tracing = tracing_sessions();
+        let total = if tracing { self.standalone.len() } else { 0 };
+        let session = self.standalone.entry(uri.clone()).or_default();
+        if tracing {
+            if session.id == 0 {
+                static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                session.id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                trace_sessions(
+                    "standalone: create",
+                    format!("sid{} {uri} (map {total})", session.id),
+                );
+            }
+            let id = session.id;
+            trace_sessions(&format!("standalone: use sid{id}"), uri);
+        }
+        session
     }
 
     pub(crate) fn invalidate_project(&mut self, uri: &Url) {
@@ -60,12 +136,40 @@ impl DiagnosticSessions {
         };
         self.projects.remove(&root);
     }
+
+    /// Drops every cached diagnostics result while keeping the incremental
+    /// checkers and project sessions that produced them.
+    ///
+    /// Replacing the whole `DiagnosticSessions` value throws away each
+    /// `CheckSession`'s incremental type checker, and rebuilding that costs a
+    /// full re-type-check of the standard library — around 700 ms on the
+    /// reference machine, paid on the keystroke after any manifest or watched
+    /// file event. The cached *results* are what a reset is for; the incremental
+    /// state is keyed on the inputs themselves and stays valid.
+    pub(crate) fn invalidate_caches(&mut self) {
+        for session in self.standalone.values_mut() {
+            session.cached = None;
+        }
+        for session in self.projects.values_mut() {
+            session.cached = None;
+        }
+    }
 }
 
 #[derive(Default)]
 struct StandaloneDiagnosticSession {
     checker: CheckSession,
     cached: Option<CachedStandaloneDiagnostics>,
+    /// How many times this session's incremental checker has been used.
+    ///
+    /// A session that is being reused keeps this low while its checkers still
+    /// hold the standard library's cached bodies; a session that is being
+    /// recreated starts at zero every time. Tests assert on it directly rather
+    /// than on a process-wide counter, which parallel tests share.
+    checks: usize,
+    /// Process-unique identity, assigned on first use, so an address that moved
+    /// with a rehash is not mistaken for a new session in a trace.
+    id: u64,
 }
 
 struct CachedStandaloneDiagnostics {
@@ -134,11 +238,20 @@ pub fn collect_workspace_diagnostics_cancellable<S: BuildHasher>(
     } = document_groups(docs);
 
     let mut by_uri = BTreeMap::<Url, Vec<Diagnostic>>::new();
+    // A document whose buffered text could not be reconstructed gets one
+    // explicit error instead of an empty list. Omitting the URI here would make
+    // the publish step report the file as clean, which is the single most
+    // misleading thing a language server can do.
+    for (uri, document) in docs {
+        if document.out_of_sync {
+            by_uri.insert(uri.clone(), vec![out_of_sync_diagnostic()]);
+        }
+    }
     // Manifest buffers get schema diagnostics computed from the open text
     // (the project pipeline reads `Clue.toml` from disk and reports deep
     // errors as CLUE0001 on the same document).
     for (uri, document) in docs {
-        if crate::manifest_lsp::is_manifest_uri(uri) {
+        if !document.out_of_sync && crate::manifest_lsp::is_manifest_uri(uri) {
             by_uri.insert(
                 uri.clone(),
                 crate::manifest_lsp::manifest_diagnostics(&document.text),
@@ -161,12 +274,8 @@ pub fn collect_workspace_diagnostics_cancellable<S: BuildHasher>(
             continue;
         };
         live_standalone.insert(uri.clone());
-        let diagnostics = standalone_diagnostics(
-            &uri,
-            document,
-            options,
-            sessions.standalone.entry(uri.clone()).or_default(),
-        );
+        let diagnostics =
+            standalone_diagnostics(&uri, document, options, sessions.standalone_session(&uri));
         by_uri.entry(uri.clone()).or_default().extend(diagnostics);
     }
 
@@ -175,6 +284,9 @@ pub fn collect_workspace_diagnostics_cancellable<S: BuildHasher>(
             return None;
         }
         live_projects.insert(root.clone());
+        if !sessions.projects.contains_key(&root) {
+            trace_sessions("project: create", root.display());
+        }
         for uri in &project_docs {
             by_uri.entry(uri.clone()).or_default();
         }
@@ -230,19 +342,29 @@ pub fn collect_workspace_diagnostics_cancellable<S: BuildHasher>(
                 continue;
             }
             live_standalone.insert(uri.clone());
-            let diagnostics = standalone_diagnostics(
-                &uri,
-                document,
-                options,
-                sessions.standalone.entry(uri.clone()).or_default(),
-            );
+            let diagnostics =
+                standalone_diagnostics(&uri, document, options, sessions.standalone_session(&uri));
             by_uri.entry(uri.clone()).or_default().extend(diagnostics);
         }
     }
 
-    sessions
-        .standalone
-        .retain(|uri, _| live_standalone.contains(uri));
+    // Standalone sessions whose document is gone are dropped: their cached
+    // result can never be served again, and a new document re-analyses from
+    // scratch anyway.
+    let before = sessions.standalone.len();
+    sessions.standalone.retain(|uri, _| {
+        let keep = live_standalone.contains(uri);
+        if !keep {
+            trace_sessions("standalone: drop (closed)", uri);
+        }
+        keep
+    });
+    if before != sessions.standalone.len() {
+        trace_sessions(
+            "standalone: total",
+            format!("{} -> {}", before, sessions.standalone.len()),
+        );
+    }
     sessions
         .projects
         .retain(|root, _| live_projects.contains(root));
@@ -251,8 +373,11 @@ pub fn collect_workspace_diagnostics_cancellable<S: BuildHasher>(
 }
 
 fn document_groups<S: BuildHasher>(docs: &HashMap<Url, Document, S>) -> DocumentGroups {
-    let overlays = docs
-        .iter()
+    // Out-of-sync buffers are excluded from every group: their text may not
+    // match the editor, so feeding it to the project as an overlay would
+    // corrupt the diagnostics of every *other* file in the same project.
+    let current = || docs.iter().filter(|(_, document)| !document.out_of_sync);
+    let overlays = current()
         .filter_map(|(uri, document)| {
             uri.to_file_path()
                 .ok()
@@ -262,7 +387,7 @@ fn document_groups<S: BuildHasher>(docs: &HashMap<Url, Document, S>) -> Document
     let mut projects = BTreeMap::<PathBuf, Vec<Url>>::new();
     let mut standalone = Vec::new();
 
-    for uri in docs.keys() {
+    for (uri, _) in current() {
         let Ok(path) = uri.to_file_path() else {
             standalone.push(uri.clone());
             continue;
@@ -316,6 +441,16 @@ fn standalone_diagnostics(
     }
 
     let result = session.checker.check_with_options(&document.text, options);
+    session.checks += 1;
+    if std::env::var_os("RIDDLEC_PHASE_TIMING").is_some() {
+        let name = uri.as_str().rsplit('/').next().unwrap_or_default();
+        eprintln!(
+            "[session] standalone check #{} of {name}: checker {} holds {} bodies",
+            session.checks,
+            session.checker.identity(),
+            session.checker.known_bodies(),
+        );
+    }
     let diagnostics = collect_diagnostics(uri, &document.text, &result);
     session.cached = Some(CachedStandaloneDiagnostics {
         options,
