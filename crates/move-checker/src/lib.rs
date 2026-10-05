@@ -996,6 +996,20 @@ impl Analyzer<'_> {
             self.move_check_expr(ctx, tail);
             ctx.set_expr_origin_value(expr_id, ctx.expr_origin_value(tail));
             self.apply_recorded_value_use(ctx, tail);
+            // The tail read moves a tracked place even where the block result
+            // itself is only passed on — a `println!` argument takes the
+            // expanded value by reference, so `value_uses` never records a
+            // move and the source's drop glue would stay armed. MIR gives the
+            // block result its own drop slots, so leaving them armed frees a
+            // buffer the result still points at.
+            if self
+                .type_result
+                .expr_types
+                .get(&(ctx.body_id, tail))
+                .is_some_and(|ty| !matches!(ty, Type::Ref(..)) && !self.type_is_copy(ctx, ty))
+            {
+                self.result.moved_exprs.insert((ctx.body_id, tail));
+            }
         }
         ctx.pop_scope();
     }
