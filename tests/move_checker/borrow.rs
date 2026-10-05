@@ -1973,3 +1973,35 @@ fn a_mut_field_write_through_a_mutable_borrow_reaches_the_caller() {
     );
     assert_has_code(&result, "E0300");
 }
+
+#[test]
+fn a_reference_stored_through_a_parameter_keeps_its_loan() {
+    // Storing through a `&mut &i32` parameter goes through the assignment to
+    // the dereferenced place, so this shape is already caught. The neighbouring
+    // shapes that are *not* caught — a container element, a `mut` field, a
+    // trait object — are in `stored_reference.rs`.
+    let result = analyze(
+        r"
+        struct Buf { mut data: i32 }
+
+        impl Buf {
+            fun write(&mut self, value: i32) {
+                self.data = value;
+            }
+        }
+
+        fun store(slot: &mut &i32, value: &i32) {
+            *slot = value;
+        }
+
+        fun f() {
+            let mut buf = Buf { data: 1 };
+            let mut slot = &buf.data;
+            store(&mut slot, &buf.data);
+            buf.write(40);
+            let _ = *slot;
+        }
+        ",
+    );
+    assert_has_code(&result, "E0300");
+}

@@ -187,6 +187,21 @@ impl OriginValue {
         }
         self.origins.extend(other.origins);
     }
+
+    fn store_path(&mut self, path: &[FlowProjection], value: Self) {
+        self.origins.extend(value.origins.iter().cloned());
+        let Some(projection) = path.first() else {
+            return;
+        };
+        let index = match projection {
+            FlowProjection::Field(index) | FlowProjection::Index(Some(index)) => *index,
+            FlowProjection::Index(None) => return,
+        };
+        if self.fields.len() <= index {
+            self.fields.resize_with(index + 1, Self::default);
+        }
+        self.fields[index].store_path(&path[1..], value);
+    }
 }
 
 fn projected_origin_value(
@@ -1603,7 +1618,38 @@ impl Analyzer<'_> {
                         // move-out-of-Drop-owner rule as `match` arms.
                         self.check_pattern_move_from_drop(ctx, pat, &init_ty);
                     }
-                    self.apply_recorded_value_use(ctx, init);
+                    // A destructuring `let` consumes only the non-Copy fields
+                    // bound by the pattern. Consuming the scrutinee expression
+                    // wholesale here would also mark untouched siblings as
+                    // moved (`let Pair { payload } = pair; pair.tag`).
+                    let moved_places = Self::pattern_is_destructuring(ctx, pat)
+                        .then(|| {
+                            self.place_from_expr(ctx, init)
+                                .map(|root| self.pattern_move_places(ctx, pat, &root))
+                        })
+                        .flatten();
+                    if moved_places.is_none() {
+                        self.apply_recorded_value_use(ctx, init);
+                    } else {
+                        for place in moved_places.into_iter().flatten() {
+                            if Self::has_any_borrow(ctx, &place) {
+                                self.diag(
+                                    "cannot move a pattern field while borrowed".into(),
+                                    ctx.source_map.pat_ranges.get(&pat).copied(),
+                                    "E0304",
+                                );
+                                continue;
+                            }
+                            ctx.moved_places.insert(place.clone());
+                            ctx.moved_sites.insert(
+                                place,
+                                (
+                                    ctx.source_map.pat_ranges.get(&pat).copied(),
+                                    "field moved by pattern here".into(),
+                                ),
+                            );
+                        }
+                    }
                 }
                 if let Some(else_) = else_ {
                     // The else block diverges, so its moves never flow past
@@ -2770,17 +2816,15 @@ impl Analyzer<'_> {
         }
 
         let may_carry_reference = self.expr_may_carry_reference(ctx, call);
-        let summary = may_carry_reference
-            .then(|| {
-                fid.and_then(|fid| self.reference_flow.summary(fid))
-                    .or_else(|| {
-                        trait_call.as_ref().and_then(|(trait_id, method)| {
-                            self.reference_flow.trait_method_summary(*trait_id, method)
-                        })
-                    })
+        let summary = fid
+            .and_then(|fid| self.reference_flow.summary(fid))
+            .or_else(|| {
+                trait_call.as_ref().and_then(|(trait_id, method)| {
+                    self.reference_flow.trait_method_summary(*trait_id, method)
+                })
             })
-            .flatten();
-        let result = summary.map_or_else(
+            .cloned();
+        let result = summary.as_ref().map_or_else(
             || {
                 if may_carry_reference {
                     let mut result = OriginValue::default();
@@ -2795,11 +2839,19 @@ impl Analyzer<'_> {
             |summary| self.instantiate_call_summary(ctx, summary, &prepared, inputs, span),
         );
 
-        let retained = result
+        let storage_summary = summary.or_else(|| self.dynamic_trait_summary(ctx, call).cloned());
+        let stored_loans = storage_summary
+            .as_ref()
+            .map_or_else(HashSet::new, |summary| {
+                self.apply_stored_references(ctx, summary, &prepared, inputs, span)
+            });
+
+        let mut retained = result
             .origins
             .iter()
             .map(|origin| origin.loan)
             .collect::<HashSet<_>>();
+        retained.extend(stored_loans);
         for (index, value) in prepared.iter().enumerate() {
             if modes.get(index).copied().flatten().is_none() {
                 continue;
@@ -2818,6 +2870,111 @@ impl Analyzer<'_> {
         }
 
         result
+    }
+
+    fn dynamic_trait_summary<'a>(
+        &'a self,
+        ctx: &BodyCtx<'_>,
+        call: ExprId,
+    ) -> Option<&'a FunctionSummary> {
+        let Expr::Call { callee, .. } = &ctx.body.exprs[call] else {
+            return None;
+        };
+        let trait_call = self
+            .type_result
+            .trait_method_calls
+            .get(&(ctx.body_id, *callee))?;
+        trait_call.dynamic.then(|| {
+            self.reference_flow
+                .trait_method_summary(trait_call.trait_id, &trait_call.method)
+        })?
+    }
+
+    fn apply_stored_references(
+        &mut self,
+        ctx: &mut BodyCtx<'_>,
+        summary: &FunctionSummary,
+        prepared: &[OriginValue],
+        input_exprs: &[ExprId],
+        span: Option<TextRange>,
+    ) -> HashSet<LoanId> {
+        let mut retained = HashSet::new();
+        for store in &summary.stores {
+            let Some(target) = prepared.get(store.target_param) else {
+                continue;
+            };
+            let source_summary = FunctionSummary {
+                origins: store.origins.clone(),
+                opaque: store.opaque,
+                fields: Vec::new(),
+                stores: Vec::new(),
+            };
+            let source =
+                self.instantiate_call_summary(ctx, &source_summary, prepared, input_exprs, span);
+            if source.origins.is_empty() {
+                continue;
+            }
+            for target_origin in &target.origins {
+                let target_family = ctx.loan_family(target_origin.loan);
+                let transferable = source
+                    .origins
+                    .iter()
+                    .filter(|origin| {
+                        !ctx.loan_family(origin.loan)
+                            .iter()
+                            .any(|loan| target_family.contains(loan))
+                    })
+                    .cloned()
+                    .collect::<Origins>();
+                if transferable.is_empty() {
+                    continue;
+                }
+                retained.extend(transferable.iter().map(|origin| origin.loan));
+                let stored_source = OriginValue::from_origins(transferable);
+                let mut path = target_origin
+                    .place
+                    .projections
+                    .iter()
+                    .map(|projection| match projection {
+                        AccessProjection::Field(index) => FlowProjection::Field(*index),
+                        AccessProjection::Index(index) => FlowProjection::Index(*index),
+                    })
+                    .collect::<Vec<_>>();
+                path.extend(store.target_path.iter().cloned());
+                self.store_at_place(ctx, target_origin.place.root, &path, stored_source);
+            }
+        }
+        retained
+    }
+
+    fn store_at_place(
+        &mut self,
+        ctx: &mut BodyCtx<'_>,
+        root: AccessRoot,
+        path: &[FlowProjection],
+        value: OriginValue,
+    ) {
+        match root {
+            AccessRoot::Pattern(binding) => {
+                for origin in &value.origins {
+                    ctx.stored_loans.insert(origin.loan);
+                    if let Some(loan) = ctx.loans.get_mut(&origin.loan) {
+                        loan.active = true;
+                    }
+                }
+                let mut stored = ctx.local_origin_value(binding);
+                stored.store_path(path, value);
+                ctx.bind_origin_value(binding, stored);
+            }
+            AccessRoot::Param(_) | AccessRoot::LambdaParam { .. } => {
+                for origin in value.origins {
+                    if let Some(loan) = ctx.loans.get_mut(&origin.loan) {
+                        loan.permanent = true;
+                        loan.active = true;
+                    }
+                }
+            }
+        }
     }
 
     fn instantiate_call_summary(
@@ -3257,6 +3414,14 @@ impl Analyzer<'_> {
         initialization::collect_pattern_bindings(ctx.body, pat, &mut bindings);
         for (id, _) in bindings {
             Self::reset_binding_move(ctx, id);
+        }
+    }
+
+    fn pattern_is_destructuring(ctx: &BodyCtx<'_>, pat: PatId) -> bool {
+        match &ctx.body.pats[pat] {
+            Pattern::Reference { pattern, .. } => Self::pattern_is_destructuring(ctx, *pattern),
+            Pattern::Tuple { .. } | Pattern::TupleStruct { .. } | Pattern::Struct { .. } => true,
+            _ => false,
         }
     }
 
@@ -3773,6 +3938,7 @@ struct BodyCtx<'a> {
     local_origins: HashMap<PatternBindingId, Origins>,
     expr_origin_fields: HashMap<ExprId, Vec<OriginValue>>,
     local_origin_fields: HashMap<PatternBindingId, Vec<OriginValue>>,
+    stored_loans: HashSet<LoanId>,
     param_origins: HashMap<usize, Origins>,
     last_uses: HashMap<PatternBindingId, usize>,
     /// Scope depth at each enclosing loop's entry.
@@ -3818,6 +3984,7 @@ impl<'a> BodyCtx<'a> {
             local_origins: HashMap::new(),
             expr_origin_fields: HashMap::new(),
             local_origin_fields: HashMap::new(),
+            stored_loans: HashSet::new(),
             param_origins: HashMap::new(),
             last_uses: collect_local_uses(body),
             binding_scopes: HashMap::new(),
@@ -4199,6 +4366,9 @@ impl<'a> BodyCtx<'a> {
         };
         let origins = origins.iter().map(|origin| origin.loan).collect::<Vec<_>>();
         for loan in &origins {
+            if self.stored_loans.contains(loan) {
+                continue;
+            }
             if let Some(record) = self.loans.get_mut(loan) {
                 record.holders.remove(&binding);
             }

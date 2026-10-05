@@ -2,6 +2,8 @@ mod basic;
 mod borrow;
 #[path = "../support/diagnostics.rs"]
 mod diagnostic_support;
+/// Regression tests for references stored through calls.
+mod stored_reference;
 
 use ast::{self, support::AstNode};
 use frontend::{incremental::IncrementalParser, tree_builder::Parse};

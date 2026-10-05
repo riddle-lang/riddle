@@ -47,6 +47,15 @@ pub struct FunctionSummary {
     pub(crate) origins: HashSet<SummaryOrigin>,
     pub(crate) opaque: bool,
     pub(crate) fields: Vec<Self>,
+    pub(crate) stores: Vec<StoredReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredReference {
+    pub(crate) target_param: usize,
+    pub(crate) target_path: Vec<FlowProjection>,
+    pub(crate) origins: HashSet<SummaryOrigin>,
+    pub(crate) opaque: bool,
 }
 
 #[derive(Debug, Default)]
@@ -385,6 +394,7 @@ impl FunctionSummary {
             .collect(),
             opaque: false,
             fields: Vec::new(),
+            stores: Vec::new(),
         }
     }
 
@@ -406,6 +416,11 @@ impl FunctionSummary {
         }
         self.origins.extend(other.origins);
         self.opaque |= other.opaque;
+        for store in other.stores {
+            if !self.stores.contains(&store) {
+                self.stores.push(store);
+            }
+        }
     }
 
     fn with_kind(mut self, kind: FlowKind) -> Self {
@@ -505,6 +520,7 @@ impl FunctionSummary {
                 .collect(),
             opaque: self.opaque,
             fields: Vec::new(),
+            stores: Vec::new(),
         }
     }
 
@@ -520,6 +536,7 @@ impl FunctionSummary {
             origins: self.origins.clone(),
             opaque: self.opaque,
             fields: Vec::new(),
+            stores: Vec::new(),
         }
     }
 
@@ -531,7 +548,7 @@ impl FunctionSummary {
     }
 
     fn is_empty(&self) -> bool {
-        self.origins.is_empty() && !self.opaque && self.fields.is_empty()
+        self.origins.is_empty() && !self.opaque && self.fields.is_empty() && self.stores.is_empty()
     }
 }
 
@@ -548,6 +565,7 @@ struct SummaryAnalyzer<'a> {
     /// `PatternBindingId` is unique per pattern site, so one flat map suffices.
     locals: HashMap<PatternBindingId, FlowValue>,
     returned: FlowValue,
+    stores: Vec<StoredReference>,
     /// 每层循环收集带值 break 的 provenance；while/for 压入空帧后丢弃。
     loop_break_values: Vec<Vec<FlowValue>>,
 }
@@ -569,6 +587,7 @@ impl<'a> SummaryAnalyzer<'a> {
             body: &hir.bodies[body_id],
             locals: HashMap::new(),
             returned: FlowValue::default(),
+            stores: Vec::new(),
             loop_break_values: Vec::new(),
         }
     }
@@ -579,7 +598,19 @@ impl<'a> SummaryAnalyzer<'a> {
         let function = &self.hir.item_tree.functions[fid];
         let param_count = function.params.len();
         self.returned.retain_params(param_count);
-        self.returned
+        self.stores.retain(|store| {
+            store.target_param < param_count
+                && store
+                    .origins
+                    .iter()
+                    .all(|origin| origin.param < param_count)
+        });
+        FunctionSummary {
+            origins: self.returned.origins,
+            opaque: self.returned.opaque,
+            fields: self.returned.fields,
+            stores: self.stores,
+        }
     }
 
     fn analyze_expr(&mut self, expr_id: ExprId) -> FlowValue {
@@ -751,6 +782,8 @@ impl<'a> SummaryAnalyzer<'a> {
     fn analyze_binary(&mut self, lhs: ExprId, rhs: ExprId, op: BinaryOp) -> FlowValue {
         self.analyze_expr(lhs);
         let rhs_value = self.analyze_expr(rhs);
+        let stored_origins = rhs_value.origins.clone();
+        let stored_opaque = rhs_value.opaque;
         if op == BinaryOp::Assign
             && let Some((binding, direct)) = self.local_assignment(lhs)
         {
@@ -760,7 +793,34 @@ impl<'a> SummaryAnalyzer<'a> {
                 self.locals.entry(binding).or_default().merge(rhs_value);
             }
         }
+        if op == BinaryOp::Assign
+            && let Some((target_param, target_path)) = self.store_target(lhs)
+            && (!stored_origins.is_empty() || stored_opaque)
+        {
+            let store = StoredReference {
+                target_param,
+                target_path,
+                origins: stored_origins,
+                opaque: stored_opaque,
+            };
+            if !self.stores.contains(&store) {
+                self.stores.push(store);
+            }
+        }
         FlowValue::default()
+    }
+
+    fn store_target(&self, expr_id: ExprId) -> Option<(usize, Vec<FlowProjection>)> {
+        let value = self.place_value(expr_id);
+        let origin = value.origins.iter().next()?;
+        if value
+            .origins
+            .iter()
+            .any(|candidate| candidate.param != origin.param || candidate.path != origin.path)
+        {
+            return None;
+        }
+        Some((origin.param, origin.path.clone()))
     }
 
     fn analyze_if(
@@ -934,9 +994,10 @@ impl<'a> SummaryAnalyzer<'a> {
         }
 
         if let Some(fid) = self.resolve_callee(callee)
-            && let Some(summary) = self.summaries.get(&fid)
+            && let Some(summary) = self.summaries.get(&fid).cloned()
         {
-            return instantiate_summary(summary, &inputs);
+            self.propagate_stores(&summary, &inputs);
+            return instantiate_summary(&summary, &inputs);
         }
 
         // Generic-bound trait dispatch on a `#[flow = "behind_reference"]`
@@ -956,6 +1017,11 @@ impl<'a> SummaryAnalyzer<'a> {
             && trait_method_contracted(self.hir, trait_call.trait_id, &trait_call.method)
             && self.expr_may_carry_provenance(call)
         {
+            if let Some(summary) =
+                self.joined_trait_summary(trait_call.trait_id, &trait_call.method)
+            {
+                self.propagate_stores(&summary, &inputs);
+            }
             let mut result = callee_value;
             result.merge(merge_values(inputs));
             return result.with_behind_reference();
@@ -972,11 +1038,77 @@ impl<'a> SummaryAnalyzer<'a> {
         } else {
             callee_value
         };
+        if let Some((_, trait_id, method)) = trait_call_info
+            && let Some(summary) = self.joined_trait_summary(trait_id, &method)
+        {
+            self.propagate_stores(&summary, &inputs);
+        }
         result.merge(merge_values(inputs));
         if dyn_call {
             result.opaque = true;
         }
         result
+    }
+
+    fn joined_trait_summary(
+        &self,
+        trait_id: hir::item_tree::TraitId,
+        method_name: &str,
+    ) -> Option<FunctionSummary> {
+        let mut joined = None;
+        for imp in self.hir.item_tree.impls.values() {
+            let Some(trait_range) = imp.trait_ty_range else {
+                continue;
+            };
+            let Some(ResolvedName::Trait(id)) = self.hir.type_resolutions.get(&trait_range) else {
+                continue;
+            };
+            if *id != trait_id {
+                continue;
+            }
+            for method in &imp.methods {
+                if self.hir.item_tree.functions[*method].name.0 != method_name {
+                    continue;
+                }
+                if let Some(summary) = self.summaries.get(method) {
+                    joined
+                        .get_or_insert_with(FunctionSummary::default)
+                        .merge(summary.clone());
+                }
+            }
+        }
+        joined
+    }
+
+    fn propagate_stores(&mut self, summary: &FunctionSummary, inputs: &[FlowValue]) {
+        for store in &summary.stores {
+            let Some(target) = inputs.get(store.target_param) else {
+                continue;
+            };
+            let source_summary = FunctionSummary {
+                origins: store.origins.clone(),
+                opaque: store.opaque,
+                fields: Vec::new(),
+                stores: Vec::new(),
+            };
+            let source = instantiate_summary(&source_summary, inputs);
+            if source.origins.is_empty() && !source.opaque {
+                continue;
+            }
+            for target_origin in &target.origins {
+                let mut target_path = target_origin.path.clone();
+                target_path.extend(store.target_path.iter().cloned());
+                let propagated = StoredReference {
+                    target_param: target_origin.param,
+                    target_path,
+                    origins: source.origins.clone(),
+                    opaque: source.opaque,
+                };
+                if !self.stores.contains(&propagated) {
+                    self.stores.push(propagated);
+                }
+            }
+        }
     }
 
     fn resolve_callee(&self, callee: ExprId) -> Option<FunctionId> {
