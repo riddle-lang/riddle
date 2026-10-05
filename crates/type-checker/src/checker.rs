@@ -690,6 +690,15 @@ impl<'a> TypeChecker<'a> {
                     &outer_generics,
                     &outer_const_generics,
                 );
+            } else if !self.hir.item_tree.extern_function_ids.contains(&fid) {
+                // A semicolon declaration outside an `extern` block lowers to
+                // no MIR function at all, so every call would only fail at
+                // runtime as a "call to unknown function".
+                self.diagnostic(
+                    "E0015",
+                    format!("function `{}` is declared without a body", function.name.0),
+                    Some(function.extent),
+                );
             }
         }
     }
@@ -726,10 +735,13 @@ impl<'a> TypeChecker<'a> {
             dependencies.insert(const_id, deps);
             // The initializer must evaluate, and its value must fit the
             // declared type: `const N: usize = 0 - 1` previously wrapped
-            // silently into `u64::MAX` and became a legal array length.
+            // silently into `u64::MAX` and became a legal array length. Only
+            // the types the evaluator can produce are checked that way —
+            // floats, strings and aggregates are valid constants whose value
+            // lowering reads straight from the initializer expression.
             match self.const_item_value(const_id, &mut Vec::new()) {
                 Some(value) => {
-                    if !Self::const_value_fits_type(&declared, value) {
+                    if !Self::const_value_fits_type(&declared, value, self.hir.pointer_width_bits) {
                         self.diagnostic(
                             "E0011",
                             format!(
@@ -740,7 +752,9 @@ impl<'a> TypeChecker<'a> {
                         );
                     }
                 }
-                None if dep_count == 0 => {
+                None if dep_count == 0
+                    && matches!(declared, Type::Int(_) | Type::Bool | Type::Char) =>
+                {
                     let span = body.source_map.expr_ranges.get(&body.root_block).copied();
                     self.diagnostic(
                         "E0060",
@@ -2004,9 +2018,12 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Evaluates a constant item to its compile-time integer value so it can
-    /// back array lengths and const-generic arguments. Initialization cycles
-    /// are rejected as E0060 elsewhere; `active` guards against them here too.
-    pub(crate) fn const_item_value(&self, id: ConstId, active: &mut Vec<ConstId>) -> Option<u64> {
+    /// back array lengths and const-generic arguments. Values are signed so
+    /// `const N: i32 = -1` evaluates instead of reporting E0060; consumers that
+    /// need a width (lengths, const arguments) reject the negative results.
+    /// Initialization cycles are rejected as E0060 elsewhere; `active` guards
+    /// against them here too.
+    pub(crate) fn const_item_value(&self, id: ConstId, active: &mut Vec<ConstId>) -> Option<i128> {
         if active.contains(&id) {
             return None;
         }
@@ -2023,18 +2040,19 @@ impl<'a> TypeChecker<'a> {
         body: &Body,
         expr_id: ExprId,
         active: &mut Vec<ConstId>,
-    ) -> Option<u64> {
+    ) -> Option<i128> {
         match &body.exprs[expr_id] {
-            Expr::IntLiteral { value, .. } => Some(*value),
-            Expr::BoolLiteral { value } => Some(u64::from(*value)),
+            Expr::IntLiteral { value, .. } => Some(i128::from(*value)),
+            Expr::BoolLiteral { value } => Some(i128::from(*value)),
+            Expr::CharLiteral { value } => value.chars().next().map(|ch| i128::from(u32::from(ch))),
             Expr::Unary { operand, op } => {
                 let value = self.const_expr_value(body, *operand, active)?;
                 match op {
-                    // The evaluator models non-negative values only (array
-                    // lengths and const arguments); negatives stay non-const.
-                    UnaryOp::Neg if value == 0 => Some(0),
+                    UnaryOp::Neg => value.checked_neg(),
                     UnaryOp::Pos => Some(value),
-                    UnaryOp::Not => Some(!value),
+                    // Bit-not is folded to the 64-bit width the unsigned types
+                    // use, so `!0` is `u64::MAX` rather than a negative.
+                    UnaryOp::Not => Some(!value & i128::from(u64::MAX)),
                     _ => None,
                 }
             }
@@ -2852,11 +2870,11 @@ fn type_contains_infer_var(
 }
 
 /// Folds a constant binary operation over evaluated integer operands.
-fn const_value_binary(lhs: u64, rhs: u64, op: HirBinOp) -> Option<u64> {
+fn const_value_binary(lhs: i128, rhs: i128, op: HirBinOp) -> Option<i128> {
     match op {
-        // Arithmetic is checked: the evaluator models non-negative values,
-        // and an overflow (e.g. `0 - 1`) must leave the constant
-        // unevaluated instead of wrapping into a bogus array length.
+        // Arithmetic is checked: an operation that leaves the i128 working
+        // range (or divides by zero) leaves the constant unevaluated, and the
+        // declared type's own range is verified separately by E0011.
         HirBinOp::Add => lhs.checked_add(rhs),
         HirBinOp::Sub => lhs.checked_sub(rhs),
         HirBinOp::Mul => lhs.checked_mul(rhs),
@@ -2865,14 +2883,14 @@ fn const_value_binary(lhs: u64, rhs: u64, op: HirBinOp) -> Option<u64> {
         HirBinOp::BitAnd => Some(lhs & rhs),
         HirBinOp::BitOr => Some(lhs | rhs),
         HirBinOp::BitXor => Some(lhs ^ rhs),
-        HirBinOp::Shl if rhs < u64::BITS as u64 => lhs.checked_shl(rhs.try_into().ok()?),
-        HirBinOp::Shr if rhs < u64::BITS as u64 => lhs.checked_shr(rhs.try_into().ok()?),
-        HirBinOp::Eq => Some(u64::from(lhs == rhs)),
-        HirBinOp::Neq => Some(u64::from(lhs != rhs)),
-        HirBinOp::Lt => Some(u64::from(lhs < rhs)),
-        HirBinOp::Gt => Some(u64::from(lhs > rhs)),
-        HirBinOp::LtEq => Some(u64::from(lhs <= rhs)),
-        HirBinOp::GtEq => Some(u64::from(lhs >= rhs)),
+        HirBinOp::Shl if (0..64).contains(&rhs) => lhs.checked_shl(rhs as u32),
+        HirBinOp::Shr if (0..64).contains(&rhs) => lhs.checked_shr(rhs as u32),
+        HirBinOp::Eq => Some(i128::from(lhs == rhs)),
+        HirBinOp::Neq => Some(i128::from(lhs != rhs)),
+        HirBinOp::Lt => Some(i128::from(lhs < rhs)),
+        HirBinOp::Gt => Some(i128::from(lhs > rhs)),
+        HirBinOp::LtEq => Some(i128::from(lhs <= rhs)),
+        HirBinOp::GtEq => Some(i128::from(lhs >= rhs)),
         _ => None,
     }
 }
@@ -2886,47 +2904,47 @@ fn const_target_int_ty(target: &HirTypeRef) -> Option<IntTy> {
     IntTy::parse(name)
 }
 
-/// Applies `as`-cast wrapping truncation to a non-negative const value.
-fn truncate_const_value(int_ty: IntTy, value: u64) -> u64 {
+/// Applies `as`-cast wrapping truncation to a constant value, sign-extending
+/// into signed targets the way a C cast does.
+fn truncate_const_value(int_ty: IntTy, value: i128) -> i128 {
     let bits: u32 = match int_ty {
         IntTy::I8 | IntTy::U8 => 8,
         IntTy::I16 | IntTy::U16 => 16,
         IntTy::I32 | IntTy::U32 => 32,
         IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
     };
-    if bits == 64 {
-        value
+    let signed = matches!(
+        int_ty,
+        IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize
+    );
+    let wrapped = value & ((1i128 << bits) - 1);
+    if signed && (wrapped >> (bits - 1)) & 1 == 1 {
+        wrapped - (1i128 << bits)
     } else {
-        value & ((1u64 << bits) - 1)
+        wrapped
     }
 }
 
 impl TypeChecker<'_> {
-    /// True when `value` (the non-negative magnitude the const evaluator
-    /// produces, with negatives reported as `None`) is representable in the
-    /// declared constant type.
-    fn const_value_fits_type(ty: &Type, value: u64) -> bool {
+    /// True when the evaluated constant value is representable in the declared
+    /// constant type.
+    fn const_value_fits_type(ty: &Type, value: i128, pointer_bits: u32) -> bool {
         match ty {
-            Type::Int(int_ty) => Self::const_value_fits_int(*int_ty, value),
-            Type::Bool => value <= 1,
+            Type::Int(int_ty) => Self::const_value_fits_int(*int_ty, value, pointer_bits),
+            Type::Bool => matches!(value, 0 | 1),
+            Type::Char => u32::try_from(value).ok().is_some_and(|bits| {
+                // A lone `1114112` (one past the last scalar value) still
+                // folds into a valid code point after truncation, so the
+                // surrogate and `char::from_u32` rules apply to the raw bits.
+                char::from_u32(bits).is_some()
+            }),
             _ => true,
         }
     }
 
-    fn const_value_fits_int(int_ty: IntTy, value: u64) -> bool {
-        let max: u128 = match int_ty {
-            IntTy::I8 => i8::MAX as u128,
-            IntTy::I16 => i16::MAX as u128,
-            IntTy::I32 => i32::MAX as u128,
-            IntTy::I64 => i64::MAX as u128,
-            IntTy::Isize => isize::MAX as u128,
-            IntTy::U8 => u8::MAX as u128,
-            IntTy::U16 => u16::MAX as u128,
-            IntTy::U32 => u32::MAX as u128,
-            IntTy::U64 => u64::MAX as u128,
-            IntTy::Usize => usize::MAX as u128,
-        };
-        (value as u128) <= max
+    fn const_value_fits_int(int_ty: IntTy, value: i128, pointer_bits: u32) -> bool {
+        let (min, max) = int_ty.value_range(pointer_bits);
+        value >= min && value <= max
     }
 }
 

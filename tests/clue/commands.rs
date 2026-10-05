@@ -522,6 +522,51 @@ fn target_selection_prefers_cli_then_environment_then_manifest() {
 }
 
 #[test]
+fn manifest_target_applies_its_pointer_width_to_the_check() {
+    // A project whose manifest builds for a 32-bit target cannot hold
+    // `4294967296usize`: C would narrow the constant to the low half of `size_t`
+    // and run with a wrong value. The manifest's triple is only visible once the
+    // package is loaded, which happens inside the analysis, so `clue check`
+    // analyses a second time at the width that will really be built — on a
+    // 32-bit host the very same refusal comes out of the first pass instead.
+    let root = temp_root("manifest-target-pointer-width");
+    fs::create_dir_all(&root).unwrap();
+    assert!(clue(&["new", "app"], &root).status.success());
+    let project = root.join("app");
+    fs::write(
+        project.join("src/main.rid"),
+        "fun main() -> i32 { let value = 4294967296usize; if value == 0usize { 1 } else { 0 } }\n",
+    )
+    .unwrap();
+    let manifest = project.join("Clue.toml");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&manifest)
+        .unwrap()
+        .write_all(b"\n[build]\ntarget = \"i686-pc-windows-msvc\"\n")
+        .unwrap();
+
+    let narrow = clue(&["check", "app"], &root);
+    let narrow_stderr = String::from_utf8_lossy(&narrow.stderr).into_owned();
+    assert!(!narrow.status.success(), "{narrow_stderr}");
+    assert!(narrow_stderr.contains("E0011"), "{narrow_stderr}");
+
+    // The same program at a 64-bit target is accepted, so what was refused is the
+    // width rather than the literal.
+    let widened = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("i686-pc-windows-msvc", "x86_64-pc-windows-msvc");
+    fs::write(&manifest, widened).unwrap();
+    let wide = clue(&["check", "app"], &root);
+    assert!(
+        wide.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wide.stderr)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn cross_build_requires_an_installed_target_component() {
     let root = temp_root("missing-target-component");
     fs::create_dir_all(&root).unwrap();

@@ -96,7 +96,10 @@ fun main() -> i32 { answer!() + plain() }
     let uri = lsp_types::Url::from_file_path(&main_path).unwrap();
     let docs = HashMap::from([(uri.clone(), Document::new(source, Some(3)))]);
     let sessions = AnalysisSessions::default();
-    let options = CompileOptions { use_std: false };
+    let options = CompileOptions {
+        use_std: false,
+        ..Default::default()
+    };
 
     assert_imported_macro_tokens(&uri, &docs, source, options, &sessions);
 

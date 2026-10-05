@@ -239,38 +239,4 @@ impl Type {
     pub const fn is_sized(&self) -> bool {
         !matches!(self, Self::Str | Self::Slice(_))
     }
-
-    /// Rough size estimate in bytes (used for alloca sizing).
-    /// Backends may override this with target-specific layouts.
-    #[must_use]
-    pub fn size_bytes(&self) -> usize {
-        match self {
-            Self::Int(ty) => match ty {
-                IntTy::I8 | IntTy::U8 => 1,
-                IntTy::I16 | IntTy::U16 => 2,
-                IntTy::I32 | IntTy::U32 => 4,
-                IntTy::I64 | IntTy::U64 => 8,
-                IntTy::Isize | IntTy::Usize => std::mem::size_of::<usize>(),
-            },
-            Self::Float(ty) => match ty {
-                FloatTy::F32 => 4,
-                FloatTy::F64 => 8,
-            },
-            Self::Bool => 1,
-            Self::Char => 4,
-            Self::Ref(inner, _) | Self::Ptr(inner) => {
-                if inner.is_sized() {
-                    std::mem::size_of::<usize>()
-                } else {
-                    2 * std::mem::size_of::<usize>()
-                }
-            }
-            Self::FnPtr(_) => 2 * std::mem::size_of::<usize>(),
-            Self::Str | Self::Slice(_) => {
-                unreachable!("cannot compute the size of an unsized type")
-            }
-            Self::Unit | Self::Never => 0,
-            _ => 8, // 聚合类型：降级为指针大小
-        }
-    }
 }

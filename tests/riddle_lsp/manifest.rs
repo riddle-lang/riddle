@@ -211,7 +211,10 @@ fn manifest_diagnostics_flow_through_the_workspace_pipeline() {
     let mut sessions = DiagnosticSessions::default();
     let published = collect_workspace_diagnostics_cancellable(
         &docs,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &mut sessions,
         || false,
     )

@@ -10,6 +10,7 @@ unsafe extern "C" {
     fun riddle_fs_fopen(path: &str, mode: &str) -> usize;
     safe fun riddle_fs_fclose(stream: usize) -> i32;
     safe fun riddle_fs_fread(buffer: *mut u8, size: usize, count: usize, stream: usize) -> usize;
+    safe fun riddle_fs_ferror(stream: usize) -> i32;
     safe fun riddle_fs_fwrite(buffer: *const u8, size: usize, count: usize, stream: usize) -> usize;
     safe fun riddle_fs_fflush(stream: usize) -> i32;
 }
@@ -61,6 +62,12 @@ impl FsFile {
         let count = unsafe {
             riddle_fs_fread(ptr, 1usize, buffer.len(), self.stream)
         };
+        // A zero count alone cannot distinguish end of stream from a failed
+        // read, and reporting the difference is what keeps `read_to_string`
+        // from handing back a silently truncated file.
+        if count == 0usize && riddle_fs_ferror(self.stream) != 0i32 {
+            return Result::Err(FsError::ReadFailed);
+        }
         Result::Ok(count)
     }
 

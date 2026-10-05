@@ -4,8 +4,14 @@ use super::*;
 fn completion_filters_keywords_globals_and_locals_by_prefix() {
     let source = "struct Widget {}\nfun helper() {}\nfun main(value: i32) { let local = 1; loc }";
     let local_position = position(source, source.rfind("loc").unwrap() + 3);
-    let local =
-        completion_items_for_source(source, local_position, CompileOptions { use_std: false });
+    let local = completion_items_for_source(
+        source,
+        local_position,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
 
     assert_eq!(
         local
@@ -17,8 +23,14 @@ fn completion_filters_keywords_globals_and_locals_by_prefix() {
 
     let helper_start = source.find("helper() {}").unwrap();
     let helper_position = position(source, helper_start + 3);
-    let globals =
-        completion_items_for_source(source, helper_position, CompileOptions { use_std: false });
+    let globals = completion_items_for_source(
+        source,
+        helper_position,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     let helper = globals.iter().find(|item| item.label == "helper").unwrap();
     let helper_label = helper.label_details.as_ref().unwrap();
     assert_eq!(helper_label.detail.as_deref(), Some("()"));
@@ -28,7 +40,10 @@ fn completion_filters_keywords_globals_and_locals_by_prefix() {
     let keywords = completion_items_for_source(
         keyword_source,
         position(keyword_source, keyword_source.find("ret").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(keywords.iter().any(|item| item.label == "return"));
 
@@ -36,7 +51,10 @@ fn completion_filters_keywords_globals_and_locals_by_prefix() {
     let loop_items = completion_items_for_source(
         loop_source,
         position(loop_source, loop_source.find("loo").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(loop_items.iter().any(|item| item.label == "loop"));
 }
@@ -47,7 +65,10 @@ fn completion_matches_free_functions_case_insensitively() {
     let items = completion_items_for_source(
         source,
         position(source, source.rfind("f }").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(items.iter().any(|item| item.label == "Foo"), "{items:#?}");
@@ -58,7 +79,14 @@ fn completion_uses_a_precise_plain_text_edit_for_the_prefix() {
     let source = "fun helper(value: i32) -> i32 {}\nfun main() { hel }";
     let prefix_start = source.rfind("hel").unwrap();
     let cursor = position(source, prefix_start + 3);
-    let items = completion_items_for_source(source, cursor, CompileOptions { use_std: false });
+    let items = completion_items_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     let helper = items.iter().find(|item| item.label == "helper").unwrap();
 
     assert_eq!(
@@ -81,7 +109,10 @@ fn completion_includes_struct_and_enum_names_in_type_positions() {
     let items = completion_items_for_source(
         source,
         position(source, source.find(") {}").unwrap()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -121,7 +152,10 @@ fn completion_keeps_private_imports_and_generics_in_type_positions() {
     let imported_items = completion_items_for_source(
         imported,
         position(imported, imported.rfind("Wid").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(
         imported_items.iter().any(|item| item.label == "Widget"),
@@ -132,7 +166,10 @@ fn completion_keeps_private_imports_and_generics_in_type_positions() {
     let generic_items = completion_items_for_source(
         generic,
         position(generic, generic.rfind('T').unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(
         generic_items.iter().any(|item| item.label == "T"),
@@ -147,7 +184,10 @@ fn completion_keeps_expression_candidates_after_struct_field_colons() {
     let items = completion_items_for_source(
         source,
         position(source, source.find("val }").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(items.iter().any(|item| item.label == "value"), "{items:#?}");
@@ -159,7 +199,10 @@ fn completion_includes_missing_fields_in_literals_and_patterns() {
     let point_items = completion_items_for_source(
         literal,
         position(literal, literal.find("x: 1,  }").unwrap() + "x: 1, ".len()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(point_items.iter().any(|item| {
         item.label == "y" && item.kind == Some(lsp_types::CompletionItemKind::FIELD)
@@ -172,7 +215,10 @@ fn completion_includes_missing_fields_in_literals_and_patterns() {
             literal,
             literal.find("dx: 1, d").unwrap() + "dx: 1, d".len(),
         ),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(variant_items.iter().any(|item| item.label == "dy"));
     assert!(!variant_items.iter().any(|item| item.label == "dx"));
@@ -181,7 +227,10 @@ fn completion_includes_missing_fields_in_literals_and_patterns() {
     let point_pattern_items = completion_items_for_source(
         pattern,
         position(pattern, pattern.find("x,  }").unwrap() + "x, ".len()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(point_pattern_items.iter().any(|item| item.label == "y"));
     assert!(!point_pattern_items.iter().any(|item| item.label == "x"));
@@ -189,7 +238,10 @@ fn completion_includes_missing_fields_in_literals_and_patterns() {
     let variant_pattern_items = completion_items_for_source(
         pattern,
         position(pattern, pattern.find("dx, d").unwrap() + "dx, d".len()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(variant_pattern_items.iter().any(|item| item.label == "dy"));
     assert!(!variant_pattern_items.iter().any(|item| item.label == "dx"));
@@ -201,7 +253,10 @@ fn completion_includes_missing_fields_in_literals_and_patterns() {
             visibility,
             visibility.find("Point {  }").unwrap() + "Point { ".len(),
         ),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(visibility_items.iter().any(|item| item.label == "shown"));
     assert!(!visibility_items.iter().any(|item| item.label == "hidden"));
@@ -213,7 +268,10 @@ fn completion_resolves_import_paths() {
     let module_items = completion_items_for_source(
         module,
         position(module, module.find("model::;").unwrap() + "model::".len()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     let widget = module_items
         .iter()
@@ -227,7 +285,10 @@ fn completion_resolves_import_paths() {
     let root_items = completion_items_for_source(
         root,
         position(root, root.find("mo;").unwrap() + 2),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(root_items.iter().any(|item| item.label == "model"));
 
@@ -235,7 +296,10 @@ fn completion_resolves_import_paths() {
     let list_items = completion_items_for_source(
         list,
         position(list, list.find("ma}").unwrap() + 2),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(list_items.iter().any(|item| item.label == "make"));
 
@@ -243,7 +307,10 @@ fn completion_resolves_import_paths() {
     let variant_items = completion_items_for_source(
         enumeration,
         position(enumeration, enumeration.find("Ru;").unwrap() + 2),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(variant_items.iter().any(|item| {
         item.label == "Running" && item.kind == Some(lsp_types::CompletionItemKind::ENUM_MEMBER)
@@ -257,7 +324,10 @@ fn completion_filters_qualified_type_paths() {
     let items = completion_items_for_source(
         source,
         position(source, source.find("Wid)").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -278,7 +348,10 @@ fn completion_resolves_fields_and_instance_methods() {
     let items = completion_items_for_source(
         source,
         position(source, source.rfind("point.").unwrap() + "point.".len()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     let labels = items
         .iter()
@@ -312,7 +385,10 @@ fn completion_hides_private_fields_outside_the_defining_module() {
             source,
             source.rfind("model::make().").unwrap() + "model::make().".len(),
         ),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(items.iter().any(|item| item.label == "y"), "{items:#?}");
@@ -328,7 +404,10 @@ fn completion_hides_private_methods_outside_the_defining_module() {
             member_source,
             member_source.rfind("model::make().").unwrap() + "model::make().".len(),
         ),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(member_items.iter().any(|item| item.label == "shown"));
     assert!(!member_items.iter().any(|item| item.label == "secret"));
@@ -340,7 +419,10 @@ fn completion_hides_private_methods_outside_the_defining_module() {
             associated_source,
             associated_source.rfind("::").unwrap() + 2,
         ),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(associated_items.iter().any(|item| item.label == "shown"));
     assert!(!associated_items.iter().any(|item| item.label == "secret"));
@@ -352,7 +434,10 @@ fn completion_filters_member_candidates_after_the_dot() {
     let items = completion_items_for_source(
         source,
         position(source, source.rfind("c.b").unwrap() + "c.b".len()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(items.iter().any(|item| item.label == "bar"), "{items:#?}");
@@ -619,7 +704,10 @@ fn completion_respects_nested_block_scope() {
     let items = completion_items_for_source(
         source,
         position(source, source.rfind("hid").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -634,7 +722,10 @@ fn completion_includes_for_and_match_pattern_bindings() {
     let for_items = completion_items_for_source(
         for_source,
         position(for_source, for_source.find("ite }").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(
         for_items.iter().any(|item| item.label == "item"),
@@ -645,7 +736,10 @@ fn completion_includes_for_and_match_pattern_bindings() {
     let match_items = completion_items_for_source(
         match_source,
         position(match_source, match_source.find("inn }").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(
         match_items.iter().any(|item| item.label == "inner"),
@@ -660,7 +754,10 @@ fn completion_includes_private_imports() {
     let items = completion_items_for_source(
         source,
         position(source, source.rfind("Wid").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -675,7 +772,10 @@ fn completion_resolves_associated_items_through_import_aliases() {
     let items = completion_items_for_source(
         source,
         position(source, source.rfind("bu }").unwrap() + 2),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(items.iter().any(|item| item.label == "build"), "{items:#?}");
@@ -732,7 +832,10 @@ fn completion_auto_imports_public_symbol_with_bare_insertion() {
         &uri,
         &docs,
         position(main_text, main_text.find("Poi }").unwrap() + 3),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &AnalysisSessions::default(),
         || false,
     )
@@ -784,7 +887,10 @@ fn completion_keeps_same_named_auto_imports_separate_and_hides_private_items() {
         &uri,
         &docs,
         position(main_text, main_text.find("P }").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &AnalysisSessions::default(),
         || false,
     )
@@ -874,7 +980,10 @@ fn project_member_completion_uses_active_module_coordinates() {
             model_text,
             model_text.find("point.fi").unwrap() + "point.fi".len(),
         ),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &AnalysisSessions::default(),
         || false,
     )
@@ -915,7 +1024,14 @@ fn completion_offers_missing_trait_methods_in_impl_body() {
     let source = "trait Shape { fun area(self) -> f64; }\nstruct Square {}\nimpl Shape for Square {\n    ar\n}\n";
     let cursor = position(source, source.find("ar\n").unwrap() + 2);
 
-    let items = completion_items_for_source(source, cursor, CompileOptions { use_std: false });
+    let items = completion_items_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
 
     let area = items
         .iter()
@@ -941,7 +1057,14 @@ fn completion_offers_missing_associated_types_in_impl_body() {
         "trait Shape { type Unit; }\nstruct Square {}\nimpl Shape for Square {\n    Un\n}\n";
     let cursor = position(source, source.find("Un\n").unwrap() + 2);
 
-    let items = completion_items_for_source(source, cursor, CompileOptions { use_std: false });
+    let items = completion_items_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
 
     assert!(
         items
@@ -956,7 +1079,14 @@ fn completion_hides_implemented_trait_members() {
     let source = "trait Shape { fun area(self) -> f64; }\nstruct Square {}\nimpl Shape for Square {\n    fun area(self) -> f64 { 1 }\n    ar\n}\n";
     let cursor = position(source, source.rfind("ar\n").unwrap() + 2);
 
-    let items = completion_items_for_source(source, cursor, CompileOptions { use_std: false });
+    let items = completion_items_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
 
     assert!(!items.iter().any(|item| item.label == "area"));
 }
@@ -966,7 +1096,14 @@ fn completion_filters_declaration_keywords_in_expression_positions() {
     let source = "fun main() { let value = 1 + str }";
     let cursor = position(source, source.find("str }").unwrap() + 3);
 
-    let items = completion_items_for_source(source, cursor, CompileOptions { use_std: false });
+    let items = completion_items_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
 
     assert!(!items.iter().any(|item| item.label == "struct"));
     assert!(!items.iter().any(|item| item.label == "impl"));
@@ -977,7 +1114,14 @@ fn completion_keeps_declaration_keywords_at_statement_starts() {
     let source = "fun main() { le }";
     let cursor = position(source, source.find("le }").unwrap() + 2);
 
-    let items = completion_items_for_source(source, cursor, CompileOptions { use_std: false });
+    let items = completion_items_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
 
     assert!(items.iter().any(|item| item.label == "let"));
 
@@ -988,7 +1132,10 @@ fn completion_keeps_declaration_keywords_at_statement_starts() {
             expression_source,
             expression_source.find("le }").unwrap() + 2,
         ),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(!expression_items.iter().any(|item| item.label == "let"));
 }
@@ -998,7 +1145,14 @@ fn completion_offers_statement_snippets() {
     let source = "fun main() { mat }";
     let cursor = position(source, source.find("mat }").unwrap() + 3);
 
-    let items = completion_items_for_source(source, cursor, CompileOptions { use_std: false });
+    let items = completion_items_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
 
     let snippet = items
         .iter()

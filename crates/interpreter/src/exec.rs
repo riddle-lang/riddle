@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -114,6 +114,9 @@ pub(crate) struct Interpreter {
     pub(crate) stderr: Vec<u8>,
     pub(crate) rng: u64,
     pub(crate) handles: HashMap<u64, Stream>,
+    /// Handles whose last read failed, backing the C runtime's `ferror`
+    /// indicator so `std::fs` can separate a failed read from end of stream.
+    pub(crate) read_failed: HashSet<u64>,
     next_handle: u64,
     depth: usize,
     max_depth: usize,
@@ -126,6 +129,9 @@ pub(crate) struct Interpreter {
 struct Frame {
     regs: Vec<Val>,
     homes: HashMap<u32, u64>,
+    // Arena blocks owned by this activation: allocas and homes, released when
+    // the frame returns.
+    slots: Vec<u32>,
 }
 
 impl Interpreter {
@@ -159,6 +165,7 @@ impl Interpreter {
             stderr: Vec::new(),
             rng: next_seed(rng_seed),
             handles: HashMap::new(),
+            read_failed: HashSet::new(),
             next_handle: 1,
             depth: 0,
             max_depth,
@@ -227,7 +234,25 @@ impl Interpreter {
         let mut frame = Frame {
             regs: vec![Val::Unit; next_value],
             homes: HashMap::new(),
+            slots: Vec::new(),
         };
+
+        let result = self.run_frame(fid, &types, &function, &mut frame, args);
+        // Storage for this activation's locals goes back to the arena on every
+        // exit, including traps. Promoted heap blocks and interned text are not
+        // listed in `slots`, so they keep living past the return.
+        self.mem.release_slots(&frame.slots);
+        result
+    }
+
+    fn run_frame(
+        &mut self,
+        fid: Idx<Function>,
+        types: &[Type],
+        function: &Function,
+        frame: &mut Frame,
+        args: Vec<Val>,
+    ) -> Result<Val, Trap> {
         for (param, arg) in function.params.iter().zip(args) {
             frame.regs[param.value.0 as usize] = arg;
         }
@@ -244,7 +269,7 @@ impl Interpreter {
                 }
                 let value = Value(start_value + offset as u32);
                 let val = self
-                    .eval_inst(&types, &mut frame, inst)
+                    .eval_inst(types, frame, inst)
                     .map_err(|trap| match trap {
                         Trap::Internal(message) => Trap::Internal(format!(
                             "`{}` executing {} ({message})",
@@ -264,7 +289,7 @@ impl Interpreter {
                 }
                 Terminator::Branch(target) => {
                     let target = *target;
-                    self.transfer_phis(&mut frame, fid, block, target);
+                    self.transfer_phis(frame, fid, block, target);
                     block = target;
                 }
                 Terminator::CondBranch(cond, then_block, else_block) => {
@@ -276,7 +301,7 @@ impl Interpreter {
                         }
                     };
                     let target = if decided { *then_block } else { *else_block };
-                    self.transfer_phis(&mut frame, fid, block, target);
+                    self.transfer_phis(frame, fid, block, target);
                     block = target;
                 }
                 Terminator::Return(value) => {
@@ -321,7 +346,8 @@ impl Interpreter {
         if let Some(ptr) = frame.homes.get(&value.0) {
             return Ok(*ptr);
         }
-        let ptr = self.mem.alloc(size_of(ty));
+        let (slot, ptr) = self.mem.alloc_slot(size_of(ty));
+        frame.slots.push(slot);
         let val = frame.regs[value.0 as usize].clone();
         self.mem.write_val(ptr, ty, &val).map_err(Trap::Internal)?;
         frame.homes.insert(value.0, ptr);
@@ -362,13 +388,23 @@ impl Interpreter {
                 self.cast(*op, &self.ty_of(types, *operand), target, a)
             }
             InstKind::SizeOf(ty) => Ok(Val::Int(size_of(ty) as u64)),
-            InstKind::Alloca(ty) | InstKind::HeapAlloc(ty) => {
+            InstKind::Alloca(ty) => {
                 // The instruction type is the pointer; storage sized by the
                 // pointee, like the C backend's `sizeof(pointee)`.
                 let pointee_size = pointee(ty).map_or_else(|| size_of(ty), size_of);
-                Ok(Val::Ptr(self.mem.alloc(pointee_size)))
+                let (slot, ptr) = self.mem.alloc_slot(pointee_size);
+                frame.slots.push(slot);
+                Ok(Val::Ptr(ptr))
             }
-            InstKind::HeapFree(_) => Ok(Val::Unit),
+            InstKind::HeapAlloc(ty) => {
+                let pointee_size = pointee(ty).map_or_else(|| size_of(ty), size_of);
+                Ok(Val::Ptr(self.mem.heap_alloc(pointee_size)))
+            }
+            InstKind::HeapFree(ptr) => {
+                let bits = self.expect_ptr(&frame.regs[ptr.0 as usize])?;
+                self.mem.free(bits);
+                Ok(Val::Unit)
+            }
             InstKind::Load(ptr) => {
                 let bits = self.expect_ptr(&frame.regs[ptr.0 as usize])?;
                 self.mem.read_val(bits, &inst.ty).map_err(Trap::Internal)
@@ -752,10 +788,16 @@ impl Interpreter {
                     Ok(Val::Ptr(bits))
                 }
             },
-            UnOp::Deref => {
-                let bits = self.expect_ptr(&val)?;
-                self.mem.read_val(bits, result_ty).map_err(Trap::Internal)
-            }
+            UnOp::Deref => match (&val, result_ty) {
+                // An unsized pointee travels as its own fat pointer, so
+                // `*self` on a `&str` / `&[T]` keeps the `{pointer, length}`
+                // pair rather than reading a fixed-size object through it.
+                (Val::Fat(bits, len), Type::Str | Type::Slice(_)) => Ok(Val::Fat(*bits, *len)),
+                _ => {
+                    let bits = self.expect_ptr(&val)?;
+                    self.mem.read_val(bits, result_ty).map_err(Trap::Internal)
+                }
+            },
         }
     }
 

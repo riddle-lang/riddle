@@ -225,7 +225,10 @@ fn document_analysis_can_be_cancelled_before_work_starts() {
         &uri,
         &docs,
         Position::new(0, 5),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &AnalysisSessions::default(),
         &|| true,
     )

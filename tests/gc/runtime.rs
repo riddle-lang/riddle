@@ -35,8 +35,13 @@ fn run_c_program_with_env(
     // a frame below the stack-bottom anchor: the scan covers
     // [collect frame .. anchor], and same-frame locals allocated above the
     // anchor's slot would otherwise escape the conservative scan.
+    //
+    // `_POSIX_C_SOURCE` has to be set before the first system header: glibc
+    // latches the feature selection there, and the runtime's own guard would
+    // arrive too late to expose `clock_gettime` / `nanosleep` under `-std=c11`.
+    // The C backend emits the same guard at the top of its prologue.
     let program = format!(
-        "#include <stddef.h>\n#include <stdint.h>\n#include <stdio.h>\n{RUNTIME_C}\n{prelude}\nstatic int scenario(void){{ {body} }}\nint main(void){{ void *bottom = &bottom; rgc_init(bottom); return scenario(); }}"
+        "#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)\n#define _POSIX_C_SOURCE 199309L\n#endif\n#include <stddef.h>\n#include <stdint.h>\n#include <stdio.h>\n{RUNTIME_C}\n{prelude}\nstatic int scenario(void){{ {body} }}\nint main(void){{ void *bottom = &bottom; rgc_init(bottom); return scenario(); }}"
     );
     fs::write(&src, program).unwrap();
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());

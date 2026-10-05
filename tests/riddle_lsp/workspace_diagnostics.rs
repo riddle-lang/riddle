@@ -273,6 +273,13 @@ const PRODUCER_SPAN_CASES: &[DiagnosticSpanCase] = &[
         "value.missing()",
     ),
     (
+        "E0015",
+        "is declared without a body",
+        "fun missing(); fun main() { let value = missing(); }",
+        "fun missing();",
+        "fun missing();",
+    ),
+    (
         "E0020",
         "duplicate method",
         "trait Foo { fun bar(); fun bar(); }",
@@ -705,11 +712,20 @@ fn reachable_diagnostic_producers_have_exact_primary_and_lsp_spans() {
         let result = if code == "E0310" {
             riddlec::pipeline::compile_with_options_and_gc(
                 source,
-                CompileOptions { use_std: false },
+                CompileOptions {
+                    use_std: false,
+                    ..Default::default()
+                },
                 false,
             )
         } else {
-            riddlec::pipeline::compile_with_options(source, CompileOptions { use_std: false })
+            riddlec::pipeline::compile_with_options(
+                source,
+                CompileOptions {
+                    use_std: false,
+                    ..Default::default()
+                },
+            )
         };
         assert!(
             result.parse_errors.is_empty(),
@@ -823,8 +839,13 @@ fn closure_diagnostic_spans_point_at_the_relevant_source() {
     let uri = lsp_types::Url::parse("file:///closure-spans.rid").unwrap();
 
     for (code, message, source, expected, use_last) in cases {
-        let result =
-            riddlec::pipeline::compile_with_options(source, CompileOptions { use_std: false });
+        let result = riddlec::pipeline::compile_with_options(
+            source,
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
+        );
         let diagnostic = result
             .type_result
             .diagnostics
@@ -863,7 +884,13 @@ fn closure_diagnostic_spans_point_at_the_relevant_source() {
 
 fn assert_distinct_anonymous_function_diagnostic() {
     let source = "fun main() { let value = if true { [x: i32 -> x] } else { [x: i32 -> x] }; }";
-    let result = riddlec::pipeline::compile_with_options(source, CompileOptions { use_std: false });
+    let result = riddlec::pipeline::compile_with_options(
+        source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     let diagnostic = result
         .type_result
         .diagnostics

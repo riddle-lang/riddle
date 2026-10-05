@@ -57,7 +57,10 @@ fn no_gc_rejects_a_reference_to_local_stack_storage() {
             &local
         }
         ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         false,
     );
 
@@ -74,12 +77,83 @@ fn no_gc_rejects_a_reference_to_local_stack_storage() {
 fn no_gc_allows_forwarding_an_input_reference() {
     let result = compile_with_options_and_gc(
         "fun identity(value: &i32) -> &i32 { value }",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         false,
     );
 
     assert!(result.success(), "{:?}", result.analysis_diagnostics);
     assert!(result.mir_module.is_some());
+}
+
+#[test]
+fn pointer_width_sizes_every_integer_check_that_depends_on_the_target() {
+    // `usize` and `isize` are the only integer types whose range is not fixed,
+    // and three separate checks ask about it: an expression literal, a `const`
+    // initializer, and a match-pattern literal. All three now read the width
+    // from the target, so a 64-bit host compiling for a 32-bit one cannot let
+    // through a constant that the generated C would truncate in silence.
+    let source = r"
+        const BIG: usize = 4294967296;
+
+        fun pick(value: usize) -> i32 {
+            match value {
+                4294967296 => 1,
+                _ => 0,
+            }
+        }
+
+        fun main() -> i32 {
+            let wide = 4294967296usize;
+            if wide == BIG { pick(wide) } else { 1 }
+        }
+    ";
+
+    let narrow = check_with_options(
+        source,
+        CompileOptions {
+            use_std: false,
+            pointer_width_bits: 32,
+        },
+    );
+    let out_of_range = narrow
+        .type_result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "E0011")
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>();
+    // Three literal sites (the `const` initializer, the match pattern, and the
+    // expression) plus the folded `const` value itself.
+    assert_eq!(
+        out_of_range
+            .iter()
+            .filter(|message| message.as_str()
+                == "integer literal `4294967296` is out of range for `usize`")
+            .count(),
+        3,
+        "{out_of_range:?}"
+    );
+    assert_eq!(
+        out_of_range
+            .iter()
+            .filter(|message| message.as_str()
+                == "constant value `4294967296` is out of range for `usize`")
+            .count(),
+        1,
+        "{out_of_range:?}"
+    );
+
+    let wide = check_with_options(
+        source,
+        CompileOptions {
+            use_std: false,
+            pointer_width_bits: 64,
+        },
+    );
+    assert!(wide.success(), "{:?}", wide.type_result.diagnostics);
 }
 
 #[test]
@@ -96,7 +170,10 @@ fn no_gc_rejects_reference_escape_through_dyn_callable() {
             call(&callback, &mut value)
         }
         "#,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         false,
     );
 
@@ -120,7 +197,10 @@ fn no_gc_allows_forwarding_reference_through_dyn_callable() {
             callback(value)
         }
         "#,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         false,
     );
 
@@ -137,7 +217,10 @@ fn no_gc_allows_an_owned_escaping_closure() {
             move [ -> value]
         }
         ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         false,
     );
 
@@ -154,7 +237,10 @@ fn no_gc_rejects_a_borrowed_escaping_closure() {
             [ -> value]
         }
         ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         false,
     );
 
@@ -186,7 +272,10 @@ fn assert_same_check_result(left: &CompileResult, right: &CompileResult) {
 #[test]
 fn check_session_matches_stateless_checks_across_edits() {
     let mut session = CheckSession::new();
-    let options = CompileOptions { use_std: true };
+    let options = CompileOptions {
+        use_std: true,
+        ..Default::default()
+    };
     let sources = [
         "fun stable() -> i32 { 1 }\nfun main() { let value = 1; value; }",
         "// 😀\nfun stable() -> i32 { 1 }\nfun main() { missing; }",
@@ -212,7 +301,10 @@ fun f<T>(x: T) -> T { g(Wrap { inner: x }) }
 fun g<T>(x: T) -> T { f(Wrap { inner: x }) }
 fun bad() { let value: bool = 1; }
 ";
-    let options = CompileOptions { use_std: false };
+    let options = CompileOptions {
+        use_std: false,
+        ..Default::default()
+    };
     let mut session = CheckSession::new();
     let first = session.check_with_options(source, options);
     assert_same_check_result(&first, &check_with_options(source, options));
@@ -239,7 +331,10 @@ fun bad() { let value: bool = 1; }
 
 #[test]
 fn check_session_does_not_shift_signature_diagnostics_with_body() {
-    let options = CompileOptions { use_std: false };
+    let options = CompileOptions {
+        use_std: false,
+        ..Default::default()
+    };
     let mut session = CheckSession::new();
     let source = "fun bad(value: str) {}";
     let first = session.check_with_options(source, options);
@@ -265,7 +360,10 @@ fn check_session_does_not_shift_signature_diagnostics_with_body() {
 
 #[test]
 fn check_session_invalidates_globals_when_declarations_change() {
-    let options = CompileOptions { use_std: false };
+    let options = CompileOptions {
+        use_std: false,
+        ..Default::default()
+    };
     let mut session = CheckSession::new();
     let valid = "struct Value { field: &str }\nfun main() {}";
     let first = session.check_with_options(valid, options);
@@ -569,7 +667,10 @@ fn extern_blocks_require_unsafe_modifier() {
             extern "C" { fun external(); }
             fun main() {}
         "#,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -589,7 +690,10 @@ fn single_function_extern_imports_are_rejected() {
             extern "C" fun external();
             fun main() {}
         "#,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -608,7 +712,10 @@ fn generic_extern_declarations_are_rejected() {
             unsafe extern "C" { fun external<T>(value: T); }
             fun main() {}
         "#,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -623,7 +730,10 @@ fn generic_extern_declarations_are_rejected() {
 #[test]
 fn pipeline_stops_at_the_requested_stage() {
     let source = "fun main() { let value = 1; value; }";
-    let options = CompileOptions { use_std: false };
+    let options = CompileOptions {
+        use_std: false,
+        ..Default::default()
+    };
 
     let resolved = resolve_with_options(source, options);
     assert!(resolved.hir.is_some());
@@ -651,7 +761,14 @@ fn inference_stage_skips_ownership_analysis() {
     "#;
     let mut session = CheckSession::new();
     let inferred = session
-        .infer_with_options_cancellable(source, CompileOptions { use_std: false }, || false)
+        .infer_with_options_cancellable(
+            source,
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
+            || false,
+        )
         .expect("inference should not be cancelled");
 
     assert!(inferred.hir.is_some());
@@ -830,7 +947,10 @@ fn incremental_pipeline_stops_when_cancelled_between_stages() {
 
     let result = session.check_with_options_cancellable(
         "fun main() { let value = 1; value; }",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         || {
             polls.set(polls.get() + 1);
             polls.get() >= 3
@@ -1264,7 +1384,10 @@ fn try_propagates_result_and_converts_error() {
                 }
             }
             ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -1282,7 +1405,10 @@ fn try_propagates_result_and_converts_error() {
 fn try_requires_result_operand() {
     let result = compile_with_options(
         "fun main() -> i32 { let value = 1?; value }",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(!result.success());
@@ -1793,7 +1919,10 @@ fn compile_can_skip_std() {
                 let value = range(0, 3);
             }
             ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(!result.success());
@@ -1815,7 +1944,10 @@ fn compile_without_std_accepts_basic_program() {
                 let value = 1;
             }
             ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(result.success(), "{:#?}", result.type_result.diagnostics);
@@ -1825,7 +1957,10 @@ fn compile_without_std_accepts_basic_program() {
 fn const_declarations_require_an_initializer() {
     let result = compile_with_options(
         "const ANSWER: i32; fun main() {}",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(
@@ -1840,13 +1975,22 @@ fn type_aliases_require_a_value_outside_trait_declarations() {
         "type Missing; fun main() {}",
         "struct Item {} impl Item { type Missing; } fun main() {}",
     ] {
-        let result = compile_with_options(source, CompileOptions { use_std: false });
+        let result = compile_with_options(
+            source,
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
+        );
         assert!(!result.parse_errors.is_empty(), "{source}");
     }
 
     let result = compile_with_options(
         "trait HasItem { type Item; } fun main() {}",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(result.success(), "{:#?}", result.type_result.diagnostics);
 }
@@ -1856,7 +2000,10 @@ fn rejects_non_finite_float_literals() {
     for literal in ["1e999", "1e999f32", "3.5e38f32"] {
         let result = compile_with_options(
             &format!("fun main() {{ let value = {literal}; }}"),
-            CompileOptions { use_std: false },
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         );
 
         assert!(!result.success(), "{literal} should be rejected");
@@ -1876,7 +2023,10 @@ fn malformed_radix_integer_literals_report_one_lowering_error() {
     for literal in ["0x", "0x_", "0b102", "0o8"] {
         let result = compile_with_options(
             &format!("fun main() {{ let value = {literal}; }}"),
-            CompileOptions { use_std: false },
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         );
 
         assert!(
@@ -1906,7 +2056,10 @@ fn unit_uses_empty_tuple_syntax() {
                 identity(());
             }
             ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
 
     assert!(result.success(), "{:#?}", result.type_result.diagnostics);
@@ -2366,7 +2519,10 @@ fn loop_break_value_compiles_and_runs_to_exit_code() {
             result
         }
         ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(result.success(), "{:#?}", result.type_result.diagnostics);
     let generated = generate_c(result.mir_module.as_ref().unwrap()).unwrap();
@@ -2441,7 +2597,10 @@ fn if_let_and_while_let_compile_and_run_to_exit_code() {
             total
         }
         ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(result.success(), "{:#?}", result.type_result.diagnostics);
     let generated = generate_c(result.mir_module.as_ref().unwrap()).unwrap();
@@ -2537,7 +2696,10 @@ fn for_pattern_destructuring_compiles_and_runs_to_exit_code() {
             sum
         }
         ",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(result.success(), "{:#?}", result.type_result.diagnostics);
     let generated = generate_c(result.mir_module.as_ref().unwrap()).unwrap();
@@ -2612,7 +2774,10 @@ fn panic_locations_resolve_to_the_original_module_file() {
     let result = compile_package_with_options_and_gc(
         &loaded.source,
         std::slice::from_ref(&package_range),
-        CompileOptions { use_std: true },
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
         true,
     );
     assert!(result.success(), "{:#?}", result.type_result.diagnostics);

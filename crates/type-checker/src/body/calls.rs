@@ -281,7 +281,7 @@ impl TypeChecker<'_> {
         }
         let impl_generics = self.impl_generic_names(fid);
         let impl_const_generics = self.impl_const_generic_names(fid);
-        let params = generic_param_map_with_consts(
+        let mut params = generic_param_map_with_consts(
             impl_generics
                 .iter()
                 .map(String::as_str)
@@ -297,6 +297,27 @@ impl TypeChecker<'_> {
                 .map(String::as_str)
                 .chain(function.const_generics.iter().map(|name| name.0.as_str())),
         );
+        // A static path call (`Point::make(3)`) reaches this map without a
+        // receiver, so `Self` must be bound here the same way the declaration
+        // checker binds it, or `-> Self` falls through to E0034.
+        if let Some(self_ty_ref) = self.impl_self_ty_ref(fid).cloned() {
+            let owner = self
+                .hir
+                .item_tree
+                .impls
+                .iter()
+                .find_map(|(_, imp)| imp.methods.contains(&fid).then_some(imp));
+            if let Some(imp) = owner
+                && imp.trait_ty.is_none()
+            {
+                let self_ty = self.lower_type_ref_with_params_at(
+                    &self_ty_ref,
+                    &params,
+                    Some(imp.self_ty_range),
+                );
+                params.insert("Self".into(), self_ty);
+            }
+        }
         let mut subst = HashMap::new();
         let mut generic_arg_spans = HashMap::new();
 

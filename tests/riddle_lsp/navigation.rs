@@ -6,7 +6,10 @@ fn type_definition_of_inferred_local_targets_nominal_declaration() {
     let definition = type_definition_for_source(
         source,
         position(source, source.rfind("value").unwrap()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let GotoDefinitionResponse::Scalar(location) = definition else {
@@ -23,7 +26,10 @@ fn primitive_has_no_type_definition() {
         type_definition_for_source(
             source,
             position(source, source.rfind("value").unwrap()),
-            CompileOptions { use_std: false },
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         )
         .is_none()
     );
@@ -35,7 +41,10 @@ fn hover_shows_resolved_function_and_local_types() {
     let function_hover = hover_for_source(
         source,
         position(source, source.rfind("add(1)").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(function_contents) = function_hover.contents else {
@@ -50,7 +59,10 @@ fn hover_shows_resolved_function_and_local_types() {
     let local_hover = hover_for_source(
         source,
         position(source, source.rfind("answer;").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(local_contents) = local_hover.contents else {
@@ -65,7 +77,10 @@ fn hover_includes_function_documentation() {
     let hover = hover_for_source(
         source,
         position(source, source.rfind("add(1, 2)").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(contents) = hover.contents else {
@@ -80,7 +95,10 @@ fn hover_includes_trailing_function_documentation() {
     let hover = hover_for_source(
         source,
         position(source, source.rfind("add(1, 2)").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(contents) = hover.contents else {
@@ -112,7 +130,10 @@ type a = Foo;";
         let hover = hover_for_source(
             source,
             position(source, offset + 1),
-            CompileOptions { use_std: false },
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         )
         .unwrap();
         let HoverContents::Markup(contents) = hover.contents else {
@@ -127,7 +148,10 @@ type a = Foo;";
     let struct_hover = hover_for_source(
         source,
         position(source, source.find("Record {").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(struct_contents) = struct_hover.contents else {
@@ -141,7 +165,10 @@ type a = Foo;";
     let alias_hover = hover_for_source(
         source,
         position(source, source.find("a =").unwrap()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(alias_contents) = alias_hover.contents else {
@@ -157,7 +184,10 @@ fn definition_and_implementation_follow_trait_dispatch() {
     let definition = definition_for_source(
         source,
         position(source, call + 2),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let GotoDefinitionResponse::Scalar(definition) = definition else {
@@ -175,7 +205,10 @@ fn definition_and_implementation_follow_trait_dispatch() {
     let implementation = implementation_for_source(
         source,
         position(source, call + 2),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let GotoDefinitionResponse::Array(implementations) = implementation else {
@@ -204,7 +237,10 @@ fn navigation_preserves_non_file_document_uris() {
         &uri,
         &docs,
         cursor,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &sessions,
     )
     .unwrap()
@@ -219,7 +255,10 @@ fn navigation_preserves_non_file_document_uris() {
         &docs,
         cursor,
         true,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &sessions,
     )
     .unwrap()
@@ -232,7 +271,10 @@ fn navigation_preserves_non_file_document_uris() {
         &docs,
         cursor,
         "renamed",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &sessions,
     )
     .unwrap()
@@ -267,7 +309,10 @@ fn definition_maps_project_symbols_to_unopened_modules() {
         &main_uri,
         &docs,
         position(main_source, main_source.find("value()").unwrap() + 2),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &AnalysisSessions::default(),
     )
     .unwrap()
@@ -298,8 +343,16 @@ fn references_respect_shadowing_declarations_and_utf16_positions() {
         .collect::<Vec<_>>();
     let cursor = position(source, occurrences[4] + 2);
 
-    let with_declaration =
-        references_for_source(source, cursor, true, CompileOptions { use_std: false }).unwrap();
+    let with_declaration = references_for_source(
+        source,
+        cursor,
+        true,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         with_declaration
             .iter()
@@ -308,8 +361,16 @@ fn references_respect_shadowing_declarations_and_utf16_positions() {
         [occurrences[0], occurrences[1], occurrences[4]].map(|offset| position(source, offset))
     );
 
-    let without_declaration =
-        references_for_source(source, cursor, false, CompileOptions { use_std: false }).unwrap();
+    let without_declaration = references_for_source(
+        source,
+        cursor,
+        false,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         without_declaration
             .iter()
@@ -318,8 +379,15 @@ fn references_respect_shadowing_declarations_and_utf16_positions() {
         [occurrences[1], occurrences[4]].map(|offset| position(source, offset))
     );
 
-    let prepared =
-        prepare_rename_for_source(source, cursor, CompileOptions { use_std: false }).unwrap();
+    let prepared = prepare_rename_for_source(
+        source,
+        cursor,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         prepared,
         PrepareRenameResponse::RangeWithPlaceholder {
@@ -331,7 +399,16 @@ fn references_respect_shadowing_declarations_and_utf16_positions() {
         }
     );
     assert!(
-        rename_for_source(source, cursor, "struct", CompileOptions { use_std: false },).is_err()
+        rename_for_source(
+            source,
+            cursor,
+            "struct",
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
+        )
+        .is_err()
     );
 }
 
@@ -349,7 +426,10 @@ fun run(value: Point, x: i32) -> i32 {
         source,
         position(source, field_definition + 1),
         true,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(field_references.len(), 4, "{field_references:#?}");
@@ -358,7 +438,10 @@ fun run(value: Point, x: i32) -> i32 {
         source,
         position(source, field_definition + 1),
         "y",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap()
     .unwrap();
@@ -385,7 +468,10 @@ fun run(value: Point, x: i32) -> i32 {
         source,
         position(source, trait_method + 2),
         true,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(method_references.len(), 3, "{method_references:#?}");
@@ -393,7 +479,10 @@ fun run(value: Point, x: i32) -> i32 {
         source,
         position(source, trait_method + 2),
         "inspect",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap()
     .unwrap();
@@ -414,7 +503,10 @@ fn explicit_import_aliases_are_renamed_independently() {
         source,
         position(source, alias_use + 2),
         true,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(alias_references.len(), 2, "{alias_references:#?}");
@@ -424,7 +516,10 @@ fn explicit_import_aliases_are_renamed_independently() {
         source,
         position(source, value_definition + 2),
         true,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(value_references.len(), 2, "{value_references:#?}");
@@ -434,7 +529,10 @@ fn explicit_import_aliases_are_renamed_independently() {
             source,
             position(source, import_value + 2),
             true,
-            CompileOptions { use_std: false },
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         )
         .unwrap(),
         value_references
@@ -444,7 +542,10 @@ fn explicit_import_aliases_are_renamed_independently() {
         source,
         position(source, alias_use + 2),
         "load",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap()
     .unwrap();
@@ -495,7 +596,10 @@ fn project_rename_uses_overlays_and_versions_only_open_documents() {
         &docs,
         cursor,
         true,
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &sessions,
     )
     .unwrap()
@@ -512,7 +616,10 @@ fn project_rename_uses_overlays_and_versions_only_open_documents() {
         &docs,
         cursor,
         "answer",
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &sessions,
     )
     .unwrap()
@@ -555,7 +662,10 @@ fn hover_shows_inferred_lambda_parameter_type() {
     let declaration_hover = hover_for_source(
         source,
         position(source, source.rfind("[v ->").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(declaration_contents) = declaration_hover.contents else {
@@ -566,7 +676,10 @@ fn hover_shows_inferred_lambda_parameter_type() {
     let use_hover = hover_for_source(
         source,
         position(source, source.rfind("v * 2").unwrap()),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(use_contents) = use_hover.contents else {
@@ -582,7 +695,10 @@ fn hover_shows_instantiated_method_signature() {
     let hover = hover_for_source(
         source,
         position(source, source.rfind(".show()").unwrap() + 1),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let HoverContents::Markup(contents) = hover.contents else {

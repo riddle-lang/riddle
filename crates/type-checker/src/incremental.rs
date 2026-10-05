@@ -137,7 +137,7 @@ impl IncrementalTypeChecker {
             hir,
             body_fingerprint,
             None,
-            type_context_fingerprint_with_ranges(&hir.item_tree),
+            type_context_fingerprint_with_ranges(&hir.item_tree, hir.pointer_width_bits),
         )
     }
 
@@ -680,9 +680,14 @@ fn type_context_fingerprint(tree: &ItemTree) -> u64 {
 /// cover names, signatures, generic bounds, variants and fields. Bodies do not:
 /// they are tracked individually by `body_fingerprint` and
 /// `syntax_body_fingerprint`, which decide whether one body needs re-checking.
-fn type_context_fingerprint_with_ranges(tree: &ItemTree) -> u64 {
+///
+/// The pointer width participates because an integer range check was made
+/// against it: a `usize` literal that fits a 64-bit target does not fit a
+/// 32-bit one, and switching the target changes no declaration at all.
+fn type_context_fingerprint_with_ranges(tree: &ItemTree, pointer_bits: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
     type_context_fingerprint(tree).hash(&mut hasher);
+    pointer_bits.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -719,6 +724,7 @@ pub fn context_fingerprint_parts(tree: &ItemTree) -> (u64, u64, u64) {
 fn type_context_fingerprint_with_packages(hir: &HirFile) -> u64 {
     let mut hasher = DefaultHasher::new();
     type_context_fingerprint(&hir.item_tree).hash(&mut hasher);
+    hir.pointer_width_bits.hash(&mut hasher);
     for (_, item) in hir.item_tree.structs.iter() {
         hir.package_for_range(item.name_range).hash(&mut hasher);
     }

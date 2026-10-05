@@ -103,13 +103,7 @@ pub(crate) fn run_target_with_options(
     } else {
         env::current_dir()?.join(root)
     };
-    let analysis = crate::analyze_project_impl_with_load_options(
-        &root,
-        &std::collections::HashMap::new(),
-        riddlec::pipeline::CompileOptions::default(),
-        true,
-        load_options,
-    )?;
+    let analysis = crate::analyze_for_built_target(&root, explicit_target, true, load_options)?;
     ensure_analysis_success(&analysis)?;
     let triple = target::resolve(explicit_target, analysis.build_target.as_deref())?;
     let target = target::load(triple, true)?;
@@ -275,7 +269,7 @@ fn build_library_dependency(
     let analysis = crate::analyze_project_impl_with_load_options(
         &root,
         &HashMap::new(),
-        pipeline::CompileOptions::default(),
+        crate::analysis_options(triple),
         true,
         options,
     )?;

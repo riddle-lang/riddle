@@ -94,6 +94,57 @@ fn accepts_supported_target_and_rejects_unknown_target() {
 }
 
 #[test]
+fn target_selects_the_pointer_width_literals_are_checked_against() {
+    // The triple used to be printed for `--verbose` and otherwise dropped, so a
+    // 64-bit host compiled an over-wide `usize` literal for a 32-bit target into
+    // `((size_t)UINT64_C(4294967296))` — a constant C narrows to the low half of
+    // `size_t` without a word, and the program then ran with a wrong value.
+    // Selecting the target now selects the width the literal is range-checked
+    // against, so the program is refused before it can reach codegen.
+    let root = temp_root("target-pointer-width");
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("main.rid");
+    fs::write(
+        &input,
+        "fun main() -> i32 { let value = 4294967296usize; if value == 0usize { 1 } else { 0 } }\n",
+    )
+    .unwrap();
+    let generated = root.join("main.c");
+
+    let narrow = run(&[
+        Path::new("--target"),
+        Path::new("i686-unknown-linux-gnu"),
+        Path::new("--emit"),
+        Path::new("c"),
+        Path::new("-o"),
+        &generated,
+        &input,
+    ]);
+    let stderr = String::from_utf8_lossy(&narrow.stderr);
+    assert!(stderr.contains("E0011"), "{stderr}");
+    assert!(stderr.contains("4294967296"), "{stderr}");
+    assert!(!generated.exists(), "a refused program must not emit C");
+
+    let wide = run(&[
+        Path::new("--target"),
+        Path::new("x86_64-unknown-linux-gnu"),
+        Path::new("--emit"),
+        Path::new("c"),
+        Path::new("-o"),
+        &generated,
+        &input,
+    ]);
+    assert!(
+        wide.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wide.stderr)
+    );
+    let code = fs::read_to_string(&generated).unwrap();
+    assert!(code.contains("4294967296"), "{code}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn c_backend_combines_multiple_inputs_into_one_program() {
     let root = temp_root("multiple-inputs");
     fs::create_dir_all(&root).unwrap();
@@ -124,6 +175,36 @@ fn c_backend_combines_multiple_inputs_into_one_program() {
         code.contains(&double_symbol),
         "second.rid items participate in the combined program"
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn emit_c_generates_the_same_program_as_backend_c() {
+    let root = temp_root("emit-c");
+    fs::create_dir_all(&root).unwrap();
+    let input = root.join("main.rid");
+    let generated = root.join("emitted.c");
+    fs::write(&input, "fun main() -> i32 { 7 }\n").unwrap();
+
+    let output = run(&[
+        Path::new("--emit"),
+        Path::new("c"),
+        Path::new("--output"),
+        &generated,
+        &input,
+    ]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // `--emit c` used to fall through both emission branches because `--emit`
+    // conflicts with `--backend`, exiting 0 without writing anything.
+    let code = fs::read_to_string(&generated).unwrap_or_else(|error| {
+        panic!("--emit c wrote no file: {error}");
+    });
+    assert!(code.contains("int main("), "--emit c output: {code}");
     let _ = fs::remove_dir_all(root);
 }
 

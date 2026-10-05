@@ -980,9 +980,9 @@ impl TypeChecker<'_> {
             _ => return ty,
         };
         let valid = if negative {
-            int_ty.contains_negative_magnitude(value)
+            int_ty.contains_negative_magnitude(value, self.hir.pointer_width_bits)
         } else {
-            int_ty.contains_u64(value)
+            int_ty.contains_u64(value, self.hir.pointer_width_bits)
         };
         if !valid {
             let value = if negative {

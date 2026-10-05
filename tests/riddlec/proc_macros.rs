@@ -156,7 +156,13 @@ fn function_like_macros_expand_in_expression_item_type_and_pattern_positions() {
     );
     assert!(expanded.source.contains("fun generated"));
     assert!(!expanded.source.contains("answer!"));
-    let result = check_with_options(&expanded.source, CompileOptions { use_std: false });
+    let result = check_with_options(
+        &expanded.source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "parse={:?} hir={:?} type={:?}",
@@ -209,7 +215,13 @@ fn standard_print_macros_expand_and_type_check() {
         ["print", "print", "println", "println"]
     );
 
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}\n{}",
@@ -243,7 +255,13 @@ fn standard_format_macro_expands_to_string_and_type_checks() {
         occurrence.name == "format" && occurrence.kind == ProcMacroKind::FunctionLike
     }));
 
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}\n{}",
@@ -305,7 +323,13 @@ fn standard_vec_macro_expands_and_type_checks() {
     // separate MacroCall nodes, so only the four top-level calls report.
     assert_eq!(vec_occurrences, 4);
 
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}\n{}",
@@ -337,7 +361,13 @@ fn standard_vec_macro_empty_form_hints_at_user_binding() {
         expanded.source
     );
 
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(!result.success());
     let diag = result
         .type_result
@@ -402,7 +432,13 @@ fn standard_debug_derive_expands_and_type_checks() {
         occurrence.name == "Debug" && occurrence.kind == ProcMacroKind::Derive
     }));
 
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}\n{}",
@@ -488,7 +524,13 @@ fn standard_derives_expand_and_type_check() {
         );
     }
 
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}\n{}",
@@ -545,7 +587,13 @@ fn standard_clone_derive_supports_generic_structs() {
             value.clone()
         }
     "#;
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}",
@@ -566,7 +614,13 @@ fn standard_partial_eq_derive_supports_generic_structs() {
             left.eq(right)
         }
     "#;
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}",
@@ -589,7 +643,13 @@ fn standard_eq_derive_supports_generic_structs() {
             require_eq(value);
         }
     "#;
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}",
@@ -610,7 +670,13 @@ fn standard_clone_derive_supports_generic_enums() {
             Maybe::Some(7).clone()
         }
     "#;
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}",
@@ -632,7 +698,13 @@ fn standard_partial_eq_derive_supports_generic_enums() {
         }
     "#;
     let expanded = expand_standard_macros(source);
-    let result = check_with_options(source, CompileOptions { use_std: true });
+    let result = check_with_options(
+        source,
+        CompileOptions {
+            use_std: true,
+            ..Default::default()
+        },
+    );
     assert!(
         result.success(),
         "macro={:?} parse={:?} hir={:?} type={:?}\n{}",
@@ -915,7 +987,13 @@ fn attribute_macros_receive_arguments_and_the_annotated_item_separately() {
             .unwrap()
             .contains("fun original")
     );
-    let result = check_with_options(&expanded.source, CompileOptions { use_std: false });
+    let result = check_with_options(
+        &expanded.source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     assert!(result.success(), "{:?}", result.type_result.diagnostics);
 }
 
@@ -936,7 +1014,13 @@ fn mixed_imports_preserve_ordinary_bindings() {
     );
     assert!(expanded.source.contains("use values::plain;"));
     assert!(!expanded.source.contains("macros::answer"));
-    let result = check_with_options(&expanded.source, CompileOptions { use_std: false });
+    let result = check_with_options(
+        &expanded.source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     assert!(result.success(), "{:?}", result.hir_diagnostics);
 }
 
@@ -959,7 +1043,13 @@ fn public_macro_reexports_can_be_imported_through_modules() {
     );
     assert!(!expanded.source.contains("use macros::answer"));
     assert!(!expanded.source.contains("use prelude::answer"));
-    let result = check_with_options(&expanded.source, CompileOptions { use_std: false });
+    let result = check_with_options(
+        &expanded.source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     assert!(result.success(), "{:?}", result.hir_diagnostics);
 }
 

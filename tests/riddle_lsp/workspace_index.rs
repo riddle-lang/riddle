@@ -97,7 +97,10 @@ fn workspace_index_preserves_nested_members_and_public_visibility() {
     let index = project_index_for_root(
         &root,
         &HashMap::new(),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &AnalysisSessions::default(),
     )
     .unwrap()

@@ -1331,6 +1331,55 @@ fn analyze_project_impl_with_load_options<S: BuildHasher>(
     })
 }
 
+/// Compile options for a build of `triple`: `usize` and `isize` are measured at
+/// the width that build's C compiler will give `size_t`.
+pub(crate) fn analysis_options(triple: TargetTriple) -> riddlec::pipeline::CompileOptions {
+    riddlec::pipeline::CompileOptions {
+        pointer_width_bits: triple.pointer_width_bits(),
+        ..riddlec::pipeline::CompileOptions::default()
+    }
+}
+
+/// Analyzes a project at the pointer width its build will use.
+///
+/// `build.target` in Clue.toml is only visible once the package is loaded, and
+/// loading happens inside the analysis, so a cross-width project is analysed
+/// twice: the first pass names the triple, the second re-checks integer
+/// literals against the width that will really be compiled for. A `usize`
+/// literal that needs 64 bits cannot live in a 32-bit `size_t`, and C truncates
+/// it without a word. Building at the host's width — the usual case — costs one
+/// analysis.
+///
+/// # Errors
+///
+/// Reports the project load and analysis errors, and an unusable target triple.
+pub(crate) fn analyze_for_built_target(
+    path: &Path,
+    explicit_target: Option<TargetTriple>,
+    build: bool,
+    load_options: &project::LoadOptions,
+) -> anyhow::Result<ProjectAnalysis> {
+    let assumed = target::resolve(explicit_target, None)?;
+    let analysis = analyze_project_impl_with_load_options(
+        path,
+        &HashMap::new(),
+        analysis_options(assumed),
+        build,
+        load_options,
+    )?;
+    let built = target::resolve(explicit_target, analysis.build_target.as_deref())?;
+    if built.pointer_width_bits() == assumed.pointer_width_bits() {
+        return Ok(analysis);
+    }
+    analyze_project_impl_with_load_options(
+        path,
+        &HashMap::new(),
+        analysis_options(built),
+        build,
+        load_options,
+    )
+}
+
 #[derive(Clone)]
 struct MacroAnalysis {
     diagnostics: Vec<type_checker::Diagnostic>,
@@ -1533,10 +1582,9 @@ fn check_package(
         &features,
         options.no_default_features,
     )? {
-        let analysis = analyze_project_impl_with_load_options(
+        let analysis = analyze_for_built_target(
             path,
-            &HashMap::new(),
-            riddlec::pipeline::CompileOptions::default(),
+            explicit_target,
             false,
             &project::LoadOptions {
                 bin: bin.clone(),
@@ -1546,7 +1594,6 @@ fn check_package(
                 ..project::LoadOptions::default()
             },
         )?;
-        target::resolve(explicit_target, analysis.build_target.as_deref())?;
         let errors = riddlec::diagnostics::report_mapped(
             &analysis.result,
             &analysis.source,
@@ -1605,10 +1652,9 @@ fn check_manifest_targets(
                 features,
             )?;
         }
-        let analysis = analyze_project_impl_with_load_options(
+        let analysis = analyze_for_built_target(
             root,
-            &HashMap::new(),
-            riddlec::pipeline::CompileOptions::default(),
+            None,
             false,
             &project::LoadOptions {
                 entry: Some(target.path.clone()),
@@ -1620,7 +1666,6 @@ fn check_manifest_targets(
                 ..project::LoadOptions::default()
             },
         )?;
-        target::resolve(None, analysis.build_target.as_deref())?;
         let errors = riddlec::diagnostics::report_mapped(
             &analysis.result,
             &analysis.source,
@@ -2050,9 +2095,10 @@ where
 /// Returns an error when the project cannot be loaded or fails to check.
 pub fn generate_doc(
     path: &Path,
+    package: Option<&str>,
     open: bool,
     document_private_items: bool,
     no_std: bool,
 ) -> anyhow::Result<()> {
-    doc::generate(path, document_private_items, open, no_std).map(|_| ())
+    doc::generate(path, package, document_private_items, open, no_std).map(|_| ())
 }

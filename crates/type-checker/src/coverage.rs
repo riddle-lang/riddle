@@ -91,7 +91,7 @@ impl TypeChecker<'_> {
         )?;
         let witness = witness.first()?;
         let pattern = self.display_matrix_pattern(witness);
-        let notes = integer_range_notes(witness, &pattern);
+        let notes = integer_range_notes(witness, &pattern, self.hir.pointer_width_bits);
         Some((pattern, notes))
     }
 
@@ -119,7 +119,7 @@ impl TypeChecker<'_> {
         )?;
         let witness = witness.first()?;
         let pattern = self.display_matrix_pattern(witness);
-        let notes = integer_range_notes(witness, &pattern);
+        let notes = integer_range_notes(witness, &pattern, self.hir.pointer_width_bits);
         Some((pattern, notes))
     }
 
@@ -194,7 +194,7 @@ impl TypeChecker<'_> {
             }
             MatrixPat::Wildcard if integer_type(&types[0]).is_some() => {
                 let ty = integer_type(&types[0]).unwrap();
-                let ranges = uncovered_integer_ranges(matrix, ty);
+                let ranges = uncovered_integer_ranges(matrix, ty, self.hir.pointer_width_bits);
                 if !ranges.is_empty() {
                     let witness = self.useful_inner(
                         &default_matrix(matrix),
@@ -214,7 +214,7 @@ impl TypeChecker<'_> {
                 // A finite integer domain may be fully listed with singleton patterns.
                 // ponytail: multi-column full domains scan per literal; group rows if this
                 // becomes measurable for exhaustive integer product matches.
-                for (_, value) in integer_literals(matrix, ty) {
+                for (_, value) in integer_literals(matrix, ty, self.hir.pointer_width_bits) {
                     let constructor = Constructor::Int(value);
                     let specialized = specialize(matrix, &constructor, 0);
                     if let Some(witness) =
@@ -294,10 +294,12 @@ impl TypeChecker<'_> {
         match ctx.body.pats[pat].clone() {
             Pattern::Wildcard => MatrixPat::Wildcard,
             Pattern::Reference { pattern, .. } => self.lower_matrix_pattern(ctx, pattern, expected),
-            Pattern::Literal(literal) => literal_constructor(literal, expected)
-                .map_or(MatrixPat::Invalid, |constructor| {
-                    MatrixPat::Constructor(constructor, Vec::new())
-                }),
+            Pattern::Literal(literal) => {
+                literal_constructor(literal, expected, self.hir.pointer_width_bits)
+                    .map_or(MatrixPat::Invalid, |constructor| {
+                        MatrixPat::Constructor(constructor, Vec::new())
+                    })
+            }
             Pattern::Binding { name, .. } => {
                 let Type::Enum(enum_id, _) = expected else {
                     return MatrixPat::Wildcard;
@@ -714,7 +716,11 @@ fn reference_pattern_coverage_type(ty: &Type) -> Type {
     }
 }
 
-fn literal_constructor(literal: LiteralPattern, expected: &Type) -> Option<Constructor> {
+fn literal_constructor(
+    literal: LiteralPattern,
+    expected: &Type,
+    pointer_bits: u32,
+) -> Option<Constructor> {
     match literal {
         LiteralPattern::Int {
             value,
@@ -723,7 +729,7 @@ fn literal_constructor(literal: LiteralPattern, expected: &Type) -> Option<Const
         } => {
             let ty = integer_type(expected)?;
             (valid
-                && ty.contains_u64(value)
+                && ty.contains_u64(value, pointer_bits)
                 && suffix
                     .as_deref()
                     .is_none_or(|suffix| IntTy::parse(suffix) == Some(ty)))
@@ -762,12 +768,12 @@ const fn integer_type(ty: &Type) -> Option<IntTy> {
     }
 }
 
-fn integer_literals(matrix: &[Vec<MatrixPat>], ty: IntTy) -> Vec<(u128, u64)> {
+fn integer_literals(matrix: &[Vec<MatrixPat>], ty: IntTy, pointer_bits: u32) -> Vec<(u128, u64)> {
     let mut literals = matrix
         .iter()
         .filter_map(|row| match row.first()? {
             MatrixPat::Constructor(Constructor::Int(value), fields) if fields.is_empty() => {
-                integer_ordinal(ty, *value).map(|ordinal| (ordinal, *value))
+                integer_ordinal(ty, *value, pointer_bits).map(|ordinal| (ordinal, *value))
             }
             _ => None,
         })
@@ -777,12 +783,16 @@ fn integer_literals(matrix: &[Vec<MatrixPat>], ty: IntTy) -> Vec<(u128, u64)> {
     literals
 }
 
-fn uncovered_integer_ranges(matrix: &[Vec<MatrixPat>], ty: IntTy) -> Vec<IntegerRange> {
-    let max = integer_max_ordinal(ty);
+fn uncovered_integer_ranges(
+    matrix: &[Vec<MatrixPat>],
+    ty: IntTy,
+    pointer_bits: u32,
+) -> Vec<IntegerRange> {
+    let max = integer_max_ordinal(ty, pointer_bits);
     let mut next = Some(0u128);
     let mut ranges = Vec::new();
 
-    for (ordinal, _) in integer_literals(matrix, ty) {
+    for (ordinal, _) in integer_literals(matrix, ty, pointer_bits) {
         let Some(start) = next else {
             break;
         };
@@ -806,7 +816,11 @@ fn uncovered_integer_ranges(matrix: &[Vec<MatrixPat>], ty: IntTy) -> Vec<Integer
     ranges
 }
 
-fn integer_range_notes(pattern: &MatrixPat, displayed_pattern: &str) -> Vec<String> {
+fn integer_range_notes(
+    pattern: &MatrixPat,
+    displayed_pattern: &str,
+    pointer_bits: u32,
+) -> Vec<String> {
     let mut uncovered = Vec::new();
     collect_integer_ranges(pattern, &mut uncovered);
     let positions = uncovered.len();
@@ -818,7 +832,7 @@ fn integer_range_notes(pattern: &MatrixPat, displayed_pattern: &str) -> Vec<Stri
             let mut ranges = ranges
                 .iter()
                 .take(MAX_DISPLAYED_INTEGER_RANGES)
-                .map(|range| format!("`{}`", display_integer_range(ty, *range)))
+                .map(|range| format!("`{}`", display_integer_range(ty, *range, pointer_bits)))
                 .collect::<Vec<_>>();
             if omitted != 0 {
                 ranges.push(format!("and {omitted} more"));
@@ -855,20 +869,20 @@ fn collect_integer_ranges<'a>(
     }
 }
 
-fn display_integer_range(ty: IntTy, range: IntegerRange) -> String {
-    let start = integer_value(ty, range.start);
+fn display_integer_range(ty: IntTy, range: IntegerRange, pointer_bits: u32) -> String {
+    let start = integer_value(ty, range.start, pointer_bits);
     if range.start == range.end {
         start
     } else {
-        format!("{start}..={}", integer_value(ty, range.end))
+        format!("{start}..={}", integer_value(ty, range.end, pointer_bits))
     }
 }
 
-fn integer_ordinal(ty: IntTy, value: u64) -> Option<u128> {
-    let (signed, bits) = integer_layout(ty);
-    if !signed {
+fn integer_ordinal(ty: IntTy, value: u64, pointer_bits: u32) -> Option<u128> {
+    let bits = ty.width_bits(pointer_bits);
+    if !ty.is_signed() {
         let value = u128::from(value);
-        return (value <= integer_max_ordinal(ty)).then_some(value);
+        return (value <= integer_max_ordinal(ty, pointer_bits)).then_some(value);
     }
 
     let half = 1u128 << (bits - 1);
@@ -876,9 +890,9 @@ fn integer_ordinal(ty: IntTy, value: u64) -> Option<u128> {
     (value < half).then_some(half + value)
 }
 
-fn integer_value(ty: IntTy, ordinal: u128) -> String {
-    let (signed, bits) = integer_layout(ty);
-    if !signed {
+fn integer_value(ty: IntTy, ordinal: u128, pointer_bits: u32) -> String {
+    let bits = ty.width_bits(pointer_bits);
+    if !ty.is_signed() {
         return ordinal.to_string();
     }
     let min = -(1i128 << (bits - 1));
@@ -886,24 +900,8 @@ fn integer_value(ty: IntTy, ordinal: u128) -> String {
     (min + ordinal).to_string()
 }
 
-const fn integer_max_ordinal(ty: IntTy) -> u128 {
-    let (_, bits) = integer_layout(ty);
-    (1u128 << bits) - 1
-}
-
-const fn integer_layout(ty: IntTy) -> (bool, u32) {
-    match ty {
-        IntTy::I8 => (true, 8),
-        IntTy::I16 => (true, 16),
-        IntTy::I32 => (true, 32),
-        IntTy::I64 => (true, 64),
-        IntTy::Isize => (true, usize::BITS),
-        IntTy::U8 => (false, 8),
-        IntTy::U16 => (false, 16),
-        IntTy::U32 => (false, 32),
-        IntTy::U64 => (false, 64),
-        IntTy::Usize => (false, usize::BITS),
-    }
+const fn integer_max_ordinal(ty: IntTy, pointer_bits: u32) -> u128 {
+    (1u128 << ty.width_bits(pointer_bits)) - 1
 }
 
 const fn type_head(ty: &Type) -> TypeHead {

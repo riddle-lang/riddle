@@ -533,7 +533,10 @@ fn moving_a_mutable_reference_still_respects_live_reborrows() {
 fn bare_slice_values_are_rejected() {
     let result = riddlec::pipeline::compile_with_options(
         "fun invalid(value: [i32]) -> [i32] { value }",
-        riddlec::pipeline::CompileOptions { use_std: false },
+        riddlec::pipeline::CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(
         result

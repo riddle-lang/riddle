@@ -34,9 +34,11 @@ fn arg_str(interp: &Interpreter, args: &[Val], index: usize, name: &str) -> Resu
         .ok_or_else(|| Trap::Internal(format!("extern `{name}`: missing string argument")))
 }
 
-/// Dispatches an `extern "C"` call to a native shim. Every extern the
-/// bundled standard library declares is covered; anything else fails with
-/// `UnsupportedExtern`.
+/// Dispatches an `extern "C"` call to a native shim. Covers every extern the
+/// runtime standard library declares except the `std::proc_macro` host entry
+/// points (`riddle_alloc_bytes` and the `riddle_proc_*` set), which only exist
+/// in the C runtime that clue builds and drives as a separate process; calling
+/// one here fails with `UnsupportedExtern`.
 pub(crate) fn call_extern(
     interp: &mut Interpreter,
     name: &str,
@@ -65,7 +67,7 @@ pub(crate) fn call_extern(
         "rgc_realloc" => {
             let old = arg_ptr(args, 0, name)?;
             let size = arg_int(args, 1, name)? as usize;
-            let new = interp.mem.alloc(size);
+            let new = interp.mem.heap_alloc(size);
             if old != 0 {
                 let (old_alloc, _) = super::mem::ptr_parts(old);
                 let old_bytes = interp.mem.allocation_len(old_alloc as usize);
@@ -81,10 +83,15 @@ pub(crate) fn call_extern(
                         .write_bytes(new, &bytes)
                         .map_err(Trap::Internal)?;
                 }
+                interp.mem.free(old);
             }
             Ok(Val::Ptr(new))
         }
-        "rgc_free" => Ok(Val::Unit),
+        "rgc_free" => {
+            let ptr = arg_ptr(args, 0, name)?;
+            interp.mem.free(ptr);
+            Ok(Val::Unit)
+        }
         "riddle_str_slice_ptr" => {
             let base = arg_ptr(args, 0, name)?;
             let start = arg_int(args, 1, name)?;
@@ -170,24 +177,28 @@ pub(crate) fn call_extern(
             let handle = arg_int(args, 3, name)?;
             let total = size.saturating_mul(count);
             let mut bytes = vec![0u8; total];
-            let read = match interp.handles.get(&handle) {
-                Some(Stream::File(file)) => {
-                    file.borrow_mut()
-                        .read(&mut bytes)
-                        .map_err(|_| Trap::Abort {
-                            message: "fs read failed".into(),
-                        })?
-                }
+            let outcome = match interp.handles.get(&handle) {
+                Some(Stream::File(file)) => file.borrow_mut().read(&mut bytes),
                 Some(Stream::Stdin) => {
                     flush_stdout(interp);
-                    std::io::stdin().read(&mut bytes).map_err(|_| Trap::Abort {
-                        message: "fs read failed".into(),
-                    })?
+                    std::io::stdin().read(&mut bytes)
                 }
                 None => {
                     return Err(Trap::Internal(format!(
                         "extern `{name}`: unknown stream handle {handle}"
                     )));
+                }
+            };
+            // A host read error raises the stream's error indicator and reports
+            // a zero count, like `fread`, instead of trapping the program.
+            let read = match outcome {
+                Ok(read) => {
+                    interp.read_failed.remove(&handle);
+                    read
+                }
+                Err(_) => {
+                    interp.read_failed.insert(handle);
+                    return Ok(Val::Int(0));
                 }
             };
             if read > 0 {
@@ -198,6 +209,10 @@ pub(crate) fn call_extern(
             }
             let items = read.checked_div(size).unwrap_or(0);
             Ok(Val::Int(items as u64))
+        }
+        "riddle_fs_ferror" => {
+            let handle = arg_int(args, 0, name)?;
+            Ok(Val::Int(u64::from(interp.read_failed.contains(&handle))))
         }
         "riddle_fs_fwrite" => {
             let buffer = arg_ptr(args, 0, name)?;

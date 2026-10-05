@@ -202,7 +202,10 @@ fn use_folding_ranges(source: &str, index: &LineIndex) -> Vec<FoldingRange> {
 pub fn document_symbols_for_source(source: &str) -> Vec<DocumentSymbol> {
     let result = riddlec::pipeline::resolve_with_options(
         source,
-        riddlec::pipeline::CompileOptions { use_std: false },
+        riddlec::pipeline::CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     let Some(hir) = result.hir.as_ref() else {
         return Vec::new();

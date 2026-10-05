@@ -6,8 +6,14 @@ use riddlec::pipeline::{self, CompileOptions};
 use type_checker::Diagnostic;
 
 fn escape_diagnostics(source: &str, gc: bool) -> Vec<Diagnostic> {
-    let result =
-        pipeline::compile_with_options_and_gc(source, CompileOptions { use_std: false }, gc);
+    let result = pipeline::compile_with_options_and_gc(
+        source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+        gc,
+    );
     result.analysis_diagnostics
 }
 

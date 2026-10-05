@@ -118,6 +118,13 @@ analysis: {:#?}",
     (run.status.code().unwrap_or(-1), stdout)
 }
 
+/// The low bits of a 64-bit hash, as the host's `usize` keeps them. A `usize`
+/// literal wider than the target is rejected as E0011 on 32-bit hosts, where
+/// `hash()` can only return the truncated fold.
+fn hash_fold(value: u64) -> usize {
+    (value & (usize::MAX as u64)) as usize
+}
+
 #[test]
 fn std_collections_remove_elements_and_keep_lookups() {
     let (code, stdout) = compile_and_run(
@@ -1182,14 +1189,13 @@ fn float_hashes_fold_the_exact_bit_pattern() {
     // 0x3FF8000000000000 / 0x4002000000000000) catches that. The last pair
     // records the documented `-0.0` / `0.0` split: they compare equal yet hash
     // apart, which is safe only while floats implement `PartialEq` but not `Eq`.
+    // The two folds are printed and compared here because the expected pattern
+    // is 64 bits wide while `usize` is 32 bits on some targets.
     let source = r#"
         use crate::std::hash::Hash;
 
         fun main() -> i32 {
-            let one = 1.5f64;
-            let two = 2.25f64;
-            if one.hash() != 9826234843501278960usize { return 1; }
-            if two.hash() != 2653818900198545032usize { return 2; }
+            println!("{} {}", 1.5f64.hash(), 2.25f64.hash());
             let zero = 0.0f64;
             let neg_zero = -0.0f64;
             if zero != neg_zero { return 3; }
@@ -1199,6 +1205,18 @@ fn float_hashes_fold_the_exact_bit_pattern() {
     "#;
     let (code, stdout) = compile_and_run(source, true);
     assert_eq!(code, 0, "stdout: {stdout}");
+    let hashes = stdout
+        .split_whitespace()
+        .map(|text| text.parse::<usize>().expect("hash printed as a number"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hashes,
+        vec![
+            hash_fold(9_826_234_843_501_278_960),
+            hash_fold(2_653_818_900_198_545_032)
+        ],
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -1882,4 +1900,146 @@ fn recursive_struct_runs_without_gc() {
 
     assert_eq!(code, 0, "stdout: {stdout}");
     assert_eq!(stdout, "");
+}
+
+#[test]
+fn std_fs_read_on_write_only_handle_reports_read_failed() {
+    // `fread` returns a short count for both end of stream and failure; the
+    // stream's error indicator is what tells them apart. A write-only handle
+    // is a portable way to force a real read failure.
+    let source = r#"
+        use crate::std::fs::{write, FsError, FsFile};
+        use crate::std::result::Result;
+
+        fun main() -> i32 {
+            match write("riddle_fs_readfail.tmp", "content") {
+                Result::Ok(()) => {},
+                Result::Err(_) => { return 1; },
+            }
+            let mut file = match FsFile::create("riddle_fs_readfail.tmp") {
+                Result::Ok(file) => file,
+                Result::Err(_) => { return 2; },
+            };
+            let mut buffer = [0u8; 8];
+            match file.read(&mut buffer) {
+                Result::Err(FsError::ReadFailed) => {},
+                Result::Err(_) => { return 3; },
+                Result::Ok(count) => {
+                    // Empty reads are legal and must stay distinguishable.
+                    if count != 0usize { return 4; }
+                    return 5;
+                },
+            }
+            0
+        }
+    "#;
+    let (code, stdout) = compile_and_run(source, true);
+    let _ = fs::remove_file("riddle_fs_readfail.tmp");
+    assert_eq!(code, 0, "stdout: {stdout}");
+}
+
+#[test]
+fn slice_methods_run_on_array_values() {
+    // Codegen used to hand the slice instance a thin `&[T; N]`, which the C
+    // compiler rejected; the array now fattens into `{ptr, len}`.
+    let source = r#"
+        fun main() -> i32 {
+            let a = [4, 5, 6];
+            if a.len() != 3usize { return 1; }
+            if a.is_empty() { return 2; }
+            let mut total = 0;
+            let mut index = 0usize;
+            while index < a.len() {
+                total += a[index];
+                index += 1usize;
+            }
+            if total != 15 { return 3; }
+            0
+        }
+    "#;
+    let (code, stdout) = compile_and_run(source, true);
+    assert_eq!(code, 0, "stdout: {stdout}");
+}
+
+#[test]
+fn hash_map_accepts_str_slice_keys() {
+    let source = r#"
+        use crate::std::collections::HashMap;
+        use crate::std::hash::Hash;
+        use crate::std::string::String;
+
+        fun main() -> i32 {
+            let mut counts: HashMap<&str, i32> = HashMap::new();
+            counts.insert("alpha", 1);
+            counts.insert("beta", 2);
+            counts.insert("alpha", 3);
+            if counts.len() != 2usize { return 1; }
+            let alpha = match counts.get(&"alpha") {
+                Option::Some(value) => *value,
+                Option::None => -1,
+            };
+            if alpha != 3 { return 2; }
+            if !counts.contains_key(&"beta") { return 3; }
+            // `String` and `&str` fold the same bytes with the same algorithm.
+            let owned = String::from("alpha");
+            if owned.as_str().hash() != "alpha".hash() { return 4; }
+            0
+        }
+    "#;
+    let (code, stdout) = compile_and_run(source, true);
+    assert_eq!(code, 0, "stdout: {stdout}");
+}
+
+#[test]
+fn reference_self_trait_impl_methods_resolve() {
+    // `impl Clone for &str` spells `Self` as a reference, so a borrowed
+    // receiver only reaches it by borrowing itself; the lookup used to strip
+    // the borrow unconditionally and report the method as unknown.
+    let source = r#"
+        use crate::std::clone::Clone;
+        use crate::std::string::String;
+
+        fun main() -> i32 {
+            let owned = String::from("alpha");
+            let text: &str = owned.as_str();
+            let copied = text.clone();
+            if copied.len() != 5usize { return 1; }
+            if copied != "alpha" { return 2; }
+            0
+        }
+    "#;
+    let (code, stdout) = compile_and_run(source, true);
+    assert_eq!(code, 0, "stdout: {stdout}");
+}
+
+#[test]
+fn destructuring_assignment_writes_through_to_targets() {
+    let source = r#"
+        struct Point { x: i32, y: i32 }
+
+        fun main() -> i32 {
+            let mut a = 0;
+            let mut b = 0;
+            (a, b) = (7, 9);
+            if a != 7 || b != 9 { return 1; }
+            let mut swapped_a = 0;
+            let mut swapped_b = 0;
+            (swapped_a, swapped_b) = (b, a);
+            if swapped_a != 9 || swapped_b != 7 { return 2; }
+            let mut point = Point { x: 0, y: 0 };
+            Point { x: point.x, y: point.y } = Point { x: 3, y: 4 };
+            if point.x != 3 || point.y != 4 { return 3; }
+            // Fields pair by name, not by the order they are written in.
+            let mut first = 0;
+            let mut second = 0;
+            Point { y: second, x: first } = point;
+            if first != 3 || second != 4 { return 4; }
+            let (mut inner_left, mut inner_right) = (0, 0);
+            ((inner_left, inner_right), a) = ((5, 6), 7);
+            if inner_left != 5 || inner_right != 6 || a != 7 { return 5; }
+            0
+        }
+    "#;
+    let (code, stdout) = compile_and_run(source, true);
+    assert_eq!(code, 0, "stdout: {stdout}");
 }

@@ -43,7 +43,8 @@ struct Opts {
     #[arg(long, value_enum, conflicts_with = "backend")]
     emit: Option<EmitKind>,
 
-    /// Select the target platform triple.
+    /// Select the target platform triple, which also sets the width `usize` and
+    /// `isize` are checked at.
     #[arg(long, value_name = "TRIPLE")]
     target: Option<TargetTriple>,
 
@@ -196,6 +197,7 @@ fn compile_program(files: &[PathBuf], opts: &Opts, target: TargetTriple) -> usiz
     }
     let options = pipeline::CompileOptions {
         use_std: opts.use_std,
+        pointer_width_bits: target.pointer_width_bits(),
     };
     let package_range = 0..loaded.source.len();
     let package_ranges = std::slice::from_ref(&package_range);
@@ -226,7 +228,9 @@ fn compile_program(files: &[PathBuf], opts: &Opts, target: TargetTriple) -> usiz
             print!("{module}");
             return errors;
         }
-        if opts.backend.is_some() {
+        // `--emit c` selects the same codegen as `--backend c`; the two flags
+        // conflict, so the backend option alone is never set here.
+        if opts.backend.is_some() || opts.emit == Some(EmitKind::C) {
             // A program without `main` fails only at C link time with an opaque
             // `WinMain` error; report it here instead.
             if !module

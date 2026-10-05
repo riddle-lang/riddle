@@ -236,7 +236,7 @@ impl TypeChecker<'_> {
             value, valid: true, ..
         } = literal
             && let Type::Int(ty) = literal_ty
-            && !ty.contains_u64(*value)
+            && !ty.contains_u64(*value, self.hir.pointer_width_bits)
         {
             self.diagnostic(
                 "E0011",

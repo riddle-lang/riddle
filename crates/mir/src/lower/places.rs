@@ -1,7 +1,7 @@
 use super::{
     Body, Builder, CapturePlace, CaptureSource, DropProjection, DropSlot, Expr, ExprId, HirUnOp,
     IntTy, LetPatternInput, LetSource, LetStorage, LowerCtx, PatId, Pattern, PatternBindingId,
-    PatternBindingMode, Projection, ResolvedName, Stmt, StmtId, Type, UnOp, Value,
+    PatternBindingMode, Projection, ResolvedName, Stmt, StmtId, Type, TypePattern, UnOp, Value,
     let_pattern_bindings, resolve_field_index,
 };
 
@@ -365,7 +365,7 @@ impl LowerCtx<'_> {
         };
 
         let Some((condition, else_expr)) = condition else {
-            self.bind_let_storage(builder, body, *pat, &storage, slots);
+            self.bind_let_storage(builder, body, *pat, *init, &storage, slots);
             if builder.needs_return() {
                 self.emit_current_temporary_drop_scope(builder);
             }
@@ -387,7 +387,7 @@ impl LowerCtx<'_> {
         }
 
         builder.switch_to_block(match_block);
-        self.bind_let_storage(builder, body, *pat, &storage, slots.clone());
+        self.bind_let_storage(builder, body, *pat, *init, &storage, slots.clone());
         for slot in &slots {
             let active = builder.bconst(true);
             let flag = Self::drop_slot_flag_place(builder, slot);
@@ -411,6 +411,7 @@ impl LowerCtx<'_> {
         builder: &mut Builder,
         body: &Body,
         pat: PatId,
+        init: Option<ExprId>,
         storage: &LetStorage,
         slots: Vec<DropSlot>,
     ) {
@@ -434,6 +435,7 @@ impl LowerCtx<'_> {
                 &mut bound,
             );
         }
+        self.disarm_moved_let_source(builder, body, init, &bound);
         for (id, projection) in bound {
             let owned = slots
                 .iter()
@@ -446,6 +448,75 @@ impl LowerCtx<'_> {
         }
         if let Some(scope) = self.drop_scopes.last_mut() {
             scope.extend(slots.into_iter().rev());
+        }
+    }
+
+    /// The tracked place an initializer reads from, with the projection into
+    /// that binding's storage: `p` → (`p`, []), `p.a` → (`p`, [Field(0)]).
+    fn let_move_source(
+        &self,
+        body: &Body,
+        expr: ExprId,
+    ) -> Option<(CaptureSource, Vec<DropProjection>)> {
+        let mut projection = Vec::new();
+        let mut current = expr;
+        loop {
+            match &body.exprs[current] {
+                Expr::Path {
+                    resolved: Some(ResolvedName::PatternBinding(id)),
+                    ..
+                } => {
+                    let id = *id;
+                    return self
+                        .storage_bindings
+                        .contains(&id)
+                        .then(|| (CaptureSource::Pattern(id), projection.clone()));
+                }
+                Expr::FieldAccess { base, field } => {
+                    let index = self.resolve_field_index(*base, field);
+                    projection.push(DropProjection::Field(index));
+                    current = *base;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// A `let` that moves out of a tracked place takes ownership with it, so
+    /// the source's drop slots covering the moved projections must stop running
+    /// glue. Without this both owners drop the same buffer, which the C
+    /// runtime silently absorbs and a strict allocator reports as a
+    /// use-after-free. `match` arms do the same through
+    /// `transfer_pattern_drop_flags`.
+    fn disarm_moved_let_source(
+        &mut self,
+        builder: &mut Builder,
+        body: &Body,
+        init: Option<ExprId>,
+        bound: &[(PatternBindingId, Vec<DropProjection>)],
+    ) {
+        if bound.is_empty() {
+            return;
+        }
+        let Some((source, base)) = init.and_then(|init| self.let_move_source(body, init)) else {
+            return;
+        };
+        let Some(slots) = self.drop_slots.get(&source).cloned() else {
+            return;
+        };
+        let mut flags = Vec::new();
+        for (_, projection) in bound {
+            let mut moved = base.clone();
+            moved.extend(projection.iter().cloned());
+            for slot in &slots {
+                if slot.projection.starts_with(&moved) || moved.starts_with(&slot.projection) {
+                    flags.push(Self::drop_slot_flag_place(builder, slot));
+                }
+            }
+        }
+        let inactive = builder.bconst(false);
+        for flag in flags {
+            builder.store(inactive, flag);
         }
     }
 
@@ -618,7 +689,7 @@ impl LowerCtx<'_> {
                     );
                 }
             }
-            Pattern::Struct { fields, .. } => {
+            Pattern::Struct { path, fields } => {
                 self.bind_let_struct_pattern(
                     builder,
                     body,
@@ -628,17 +699,50 @@ impl LowerCtx<'_> {
                         value_ty,
                         projection,
                     },
+                    &path,
                     fields,
                     bound,
                 );
             }
-            // ponytail: enum patterns are refutable and rejected by E0057, and
-            // Riddle has no tuple structs, so nothing else can reach a `let`.
-            Pattern::Wildcard
-            | Pattern::Literal(_)
-            | Pattern::Path { .. }
-            | Pattern::TupleStruct { .. }
-            | Pattern::Or { .. } => {}
+            Pattern::TupleStruct { path, elements } => {
+                // let-else admits refutable patterns, so enum variants do
+                // reach `let` even though irrefutable `let` rejects them.
+                let name = path.segments.last().map(|name| name.0.as_str());
+                let TypePattern::EnumVariant {
+                    enum_id,
+                    variant_index,
+                    args,
+                } = self.classify_type_pattern(value_ty, name)
+                else {
+                    return;
+                };
+                let payloads = self.enum_variant_payload_types(enum_id, &args, variant_index);
+                let offset =
+                    Self::enum_payload_offset(&self.hir.item_tree.enums[enum_id], variant_index);
+                for (index, child) in elements.into_iter().enumerate() {
+                    let Some((_, child_ty)) = payloads.get(index) else {
+                        break;
+                    };
+                    let field_index = 1 + offset + index;
+                    let child_source = self.project(builder, source, field_index, child_ty);
+                    let mut child_projection = projection.clone();
+                    child_projection.push(DropProjection::Field(field_index));
+                    self.bind_let_pattern(
+                        builder,
+                        body,
+                        LetPatternInput {
+                            pat: child,
+                            source: child_source,
+                            value_ty: child_ty,
+                            projection: child_projection,
+                        },
+                        bound,
+                    );
+                }
+            }
+            // Unit variants and or-patterns introduce no bindings.
+            Pattern::Wildcard | Pattern::Literal(_) | Pattern::Path { .. } | Pattern::Or { .. } => {
+            }
         }
     }
 
@@ -647,25 +751,47 @@ impl LowerCtx<'_> {
         builder: &mut Builder,
         body: &Body,
         input: &LetPatternInput<'_>,
+        path: &hir::item_tree::HirPath,
         fields: Vec<hir::body::FieldPat>,
         bound: &mut Vec<(PatternBindingId, Vec<DropProjection>)>,
     ) {
-        let type_checker::Type::Struct(struct_id, args) = input.value_ty else {
-            return;
+        let (payloads, offset) = if let type_checker::Type::Struct(struct_id, args) = input.value_ty
+        {
+            (
+                self.struct_pattern_field_types(*struct_id, args)
+                    .into_iter()
+                    .map(|(name, ty)| (Some(name), ty))
+                    .collect::<Vec<_>>(),
+                0,
+            )
+        } else {
+            let name = path.segments.last().map(|name| name.0.as_str());
+            let TypePattern::EnumVariant {
+                enum_id,
+                variant_index,
+                args,
+            } = self.classify_type_pattern(input.value_ty, name)
+            else {
+                return;
+            };
+            (
+                self.enum_variant_payload_types(enum_id, &args, variant_index),
+                1 + Self::enum_payload_offset(&self.hir.item_tree.enums[enum_id], variant_index),
+            )
         };
-        let field_types = self.struct_pattern_field_types(*struct_id, args);
         for (binding_index, field) in fields.into_iter().enumerate() {
-            let Some((index, (_, child_ty))) = field_types
+            let Some((index, (_, child_ty))) = payloads
                 .iter()
                 .enumerate()
-                .find(|(_, (name, _))| *name == field.name.0)
+                .find(|(_, (name, _))| name.as_deref() == Some(field.name.0.as_str()))
             else {
                 continue;
             };
+            let field_index = offset + index;
             let child_ty = child_ty.clone();
-            let child_source = self.project(builder, input.source, index, &child_ty);
+            let child_source = self.project(builder, input.source, field_index, &child_ty);
             let mut projection = input.projection.clone();
-            projection.push(DropProjection::Field(index));
+            projection.push(DropProjection::Field(field_index));
             match field.pat {
                 Some(child) => self.bind_let_pattern(
                     builder,

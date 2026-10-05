@@ -571,13 +571,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Doc {
             path,
-            package: _,
+            package,
             open,
             document_private_items,
             no_std,
         } => {
             let path = path.as_deref().unwrap_or_else(|| std::path::Path::new("."));
-            clue::generate_doc(path, open, document_private_items, no_std)?;
+            clue::generate_doc(
+                path,
+                package.as_deref(),
+                open,
+                document_private_items,
+                no_std,
+            )?;
         }
         Commands::Test {
             path,

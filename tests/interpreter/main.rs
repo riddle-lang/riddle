@@ -1,7 +1,8 @@
-//! Interpreter integration tests: compile Riddle sources through the full
-//! pipeline and execute the MIR with the in-process interpreter — no C
-//! toolchain required. The scenarios mirror `tests/mir/std_behavior.rs` so
-//! interpreter semantics stay aligned with the C backend.
+//! Interpreter integration tests: compile Riddle sources through the same
+//! entry point `riddle run` uses and execute the MIR with the in-process
+//! interpreter — no C toolchain required. The scenarios mirror
+//! `tests/mir/std_behavior.rs` so interpreter semantics stay aligned with the
+//! C backend.
 
 use interpreter::{self, Config};
 use riddlec::pipeline;
@@ -9,7 +10,7 @@ use riddlec::pipeline;
 /// Compiles `source` and interprets `main`. Returns the exit code (or trap
 /// debug form), captured stdout, and captured stderr including trap output.
 fn run(source: &str) -> (Result<i32, String>, String, String) {
-    let result = pipeline::compile(source);
+    let result = pipeline::compile_for_interpretation(source, "test.rid");
     assert!(
         result.success(),
         "riddle diagnostics: {:#?}
@@ -193,9 +194,10 @@ fn interpreter_panic_after_macro_expansion_maps_to_user_source() {
     let (_code, stdout, stderr) = run(source);
     assert_eq!(stdout, "before\n", "stderr: {stderr}");
     assert!(stderr.contains("assertion failed"), "stderr: {stderr}");
-    assert!(stderr.contains("at source:"), "stderr: {stderr}");
-    // The site must be the `assert!` call in the user region, not the std
-    // region or the fallback module name.
+    // The site must be the `assert!` call in the user region — the file name the
+    // runner was given, as `riddle run` passes it — not the std region or the
+    // fallback module name.
+    assert!(stderr.contains("at test.rid:"), "stderr: {stderr}");
     assert!(!stderr.contains("at std:"), "stderr: {stderr}");
 }
 
@@ -1197,24 +1199,33 @@ fn interpreter_float_hashes_distinguish_values_by_bit_pattern() {
 #[test]
 fn interpreter_float_hashes_fold_the_exact_bit_pattern() {
     // Port of the C-backend pin: the interpreter walks the same `&[u8]` view, so
-    // it must produce the identical bit-exact fold.
-    assert_ok(
-        r#"
+    // it must produce the identical bit-exact fold. The hashes are printed and
+    // compared here rather than checked inside the program, because the expected
+    // fold needs a `usize` literal wider than `usize` on a 32-bit target — the
+    // checker rejects that as E0011 — while the interpreter itself keeps `usize`
+    // at one 8-byte word on every host, so the full pattern is what comes out.
+    let source = r#"
         use crate::std::hash::Hash;
 
         fun main() -> i32 {
-            let one = 1.5f64;
-            let two = 2.25f64;
-            if one.hash() != 9826234843501278960usize { return 1; }
-            if two.hash() != 2653818900198545032usize { return 2; }
+            println!("{} {}", 1.5f64.hash(), 2.25f64.hash());
             let zero = 0.0f64;
             let neg_zero = -0.0f64;
             if zero != neg_zero { return 3; }
             if zero.hash() == neg_zero.hash() { return 4; }
             0
         }
-        "#,
-        "",
+        "#;
+    let (code, stdout, stderr) = run(source);
+    assert_eq!(code, Ok(0), "stdout: {stdout}stderr: {stderr}");
+    let hashes = stdout
+        .split_whitespace()
+        .map(|text| text.parse::<u64>().expect("hash printed as a number"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hashes,
+        vec![9_826_234_843_501_278_960, 2_653_818_900_198_545_032],
+        "stdout: {stdout}stderr: {stderr}"
     );
 }
 
@@ -1624,4 +1635,243 @@ fn a_type_may_share_a_name_with_a_std_type() {
         "#,
         "7\n",
     );
+}
+
+#[test]
+fn interpreter_binds_let_else_enum_payload() {
+    // The let-else binding path only handled tuple/struct patterns, so an
+    // enum payload pattern left the binding uninitialize and reading it
+    // trapped on a zero-sized allocation.
+    assert_ok(
+        r#"
+        use std::option::Option;
+
+        fun main() -> i32 {
+            let v: Option<i32> = Option::Some(41);
+            let Option::Some(x) = v else {
+                return 1;
+            };
+            println!("x={}", x + 1);
+            0
+        }
+        "#,
+        "x=42\n",
+    );
+}
+
+#[test]
+fn interpreter_runs_let_else_diverging_arm() {
+    assert_ok(
+        r#"
+        use std::option::Option;
+
+        fun main() -> i32 {
+            let v: Option<i32> = Option::None;
+            let Option::Some(x) = v else {
+                println!("no value");
+                return 0;
+            };
+            println!("unreachable {}", x);
+            1
+        }
+        "#,
+        "no value\n",
+    );
+}
+
+#[test]
+fn interpreter_calls_slice_methods_on_array_values() {
+    // `a.len()` used to pass a thin `&[T; N]` where the slice instance reads a
+    // fat pointer.
+    assert_ok(
+        r#"
+        fun main() -> i32 {
+            let a = [1, 2, 3];
+            let mut total = 0;
+            let mut index = 0usize;
+            while index < a.len() {
+                total += a[index];
+                index += 1usize;
+            }
+            println!("{} {} {}", a.len(), a.is_empty(), total);
+            0
+        }
+        "#,
+        "3 false 6\n",
+    );
+}
+
+#[test]
+fn interpreter_assigns_through_destructuring_assignment() {
+    assert_ok(
+        r#"
+        struct Point { x: i32, y: i32 }
+
+        fun main() -> i32 {
+            let mut a = 0;
+            let mut b = 0;
+            (a, b) = (1, 2);
+            println!("{} {}", a, b);
+            let mut c = 0;
+            let mut d = 0;
+            (c, (a, b)) = (3, (4, 5));
+            println!("{} {} {} {}", c, d, a, b);
+            let mut point = Point { x: 0, y: 0 };
+            Point { x: point.x, y: point.y } = Point { x: 6, y: 7 };
+            println!("{} {}", point.x, point.y);
+            Point { y: d, x: c } = point;
+            println!("{c} {d}");
+            0
+        }
+        "#,
+        "1 2
+3 0 4 5
+6 7
+6 7
+",
+    );
+}
+
+#[test]
+fn interpreter_hashes_str_keys() {
+    assert_ok(
+        r#"
+        use std::collections::HashMap;
+
+        fun main() -> i32 {
+            let mut counts: HashMap<&str, i32> = HashMap::new();
+            counts.insert("alpha", 1);
+            counts.insert("beta", 2);
+            counts.insert("alpha", 3);
+            let alpha = match counts.get(&"alpha") {
+                Option::Some(value) => *value,
+                Option::None => -1,
+            };
+            println!("{} {} {}", alpha, counts.len(), counts.contains_key(&"beta"));
+            0
+        }
+        "#,
+        "3 2 true\n",
+    );
+}
+
+#[test]
+fn interpreter_drops_a_partially_moved_owner_once() {
+    // A `let` destructure moved the field but left the owner's drop glue armed
+    // for it too, so the buffer was freed twice.
+    assert_ok(
+        r#"
+        use std::string::String;
+
+        struct Pair { a: String, b: i32 }
+
+        fun main() -> i32 {
+            let mut total = 0;
+            let mut round = 0;
+            while round < 64 {
+                let p = Pair { a: String::from("payload"), b: round };
+                let Pair { a } = p;
+                total += a.len() as i32 + p.b;
+                round += 1;
+            }
+            println!("{}", total);
+            0
+        }
+        "#,
+        "2464\n",
+    );
+}
+
+#[test]
+fn interpreter_folds_negative_float_and_text_constants() {
+    assert_ok(
+        r#"
+        const NEG: i32 = -7;
+        const HALF: f64 = 2.5;
+        const NAME: &str = "riddle";
+
+        fun main() -> i32 {
+            println!("{} {} {}", NEG, HALF, NAME);
+            0
+        }
+        "#,
+        "-7 2.500000 riddle\n",
+    );
+}
+
+#[test]
+fn interpreter_returns_self_from_inherent_impl() {
+    assert_ok(
+        r#"
+        struct Point { x: i32, y: i32 }
+
+        impl Point {
+            fun make(x: i32, y: i32) -> Self {
+                Point { x: x, y: y }
+            }
+
+            fun sum(&self) -> i32 {
+                self.x + self.y
+            }
+        }
+
+        fun main() -> i32 {
+            let p = Point::make(20, 22);
+            println!("{}", p.sum());
+            0
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn interpreter_reclaims_scratch_between_calls() {
+    // Long-lived sessions (notably the REPL) call `main` repeatedly; frame
+    // storage used to accumulate in the arena forever.
+    let source = r#"
+        use std::vector::Vector;
+
+        fun total(seed: i32) -> i32 {
+            let mut values: Vector<i32> = Vector::new();
+            let mut index = 0;
+            while index < 32 {
+                values.push(seed + index);
+                index += 1;
+            }
+            let mut sum = 0;
+            let mut scan = 0usize;
+            while scan < values.len() {
+                sum += values[scan];
+                scan += 1usize;
+            }
+            sum
+        }
+
+        fun main() -> i32 {
+            println!("{}", total(1));
+            0
+        }
+        "#;
+    assert_ok(source, "528\n");
+}
+
+#[test]
+fn interpreter_block_value_owns_the_moved_buffer() {
+    // A block's tail moves its local, so the buffer is freed once — by the
+    // block value's own drop glue. The C backend read freed memory silently;
+    // a strict allocator traps.
+    let source = r#"
+        use crate::std::string::String;
+
+        fun main() -> i32 {
+            println!("{}", {
+                let mut buffer = String::new();
+                buffer.push_str("abc");
+                buffer
+            });
+            0
+        }
+        "#;
+    assert_ok(source, "abc\n");
 }

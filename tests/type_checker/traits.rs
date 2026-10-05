@@ -2405,7 +2405,10 @@ fn std_mode_rejects_user_defined_fundamental_struct() {
 fn no_std_mode_reports_unknown_lang_item() {
     let result = riddlec::pipeline::check_with_options(
         r#"#[lang = "unknown_item"] trait Foo {}"#,
-        riddlec::pipeline::CompileOptions { use_std: false },
+        riddlec::pipeline::CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     let e0053: Vec<_> = result
         .type_result
@@ -2433,7 +2436,10 @@ fn no_std_mode_reports_duplicate_lang_item() {
         #[lang = "copy"] trait Copy1 {}
         #[lang = "copy"] trait Copy2 {}
         "#,
-        riddlec::pipeline::CompileOptions { use_std: false },
+        riddlec::pipeline::CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     let e0053: Vec<_> = result
         .type_result
@@ -2458,7 +2464,10 @@ fn no_std_mode_reports_duplicate_lang_item() {
 fn no_std_mode_reports_missing_lang_value() {
     let result = riddlec::pipeline::check_with_options(
         "#[lang] trait Copy {}",
-        riddlec::pipeline::CompileOptions { use_std: false },
+        riddlec::pipeline::CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(result.type_result.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "E0053" && diagnostic.message.contains("requires a string value")
@@ -2473,7 +2482,10 @@ fn no_std_mode_rejects_multiple_lang_items_on_one_trait() {
         #[lang = "eq"]
         trait Marker {}
         "#,
-        riddlec::pipeline::CompileOptions { use_std: false },
+        riddlec::pipeline::CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(result.type_result.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "E0053"
@@ -2537,7 +2549,10 @@ fn no_std_mode_rejects_lang_on_every_non_trait_target() {
     for source in cases {
         let result = riddlec::pipeline::check_with_options(
             source,
-            riddlec::pipeline::CompileOptions { use_std: false },
+            riddlec::pipeline::CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         );
         assert!(
             result.type_result.diagnostics.iter().any(|diagnostic| {
@@ -2564,7 +2579,10 @@ fn no_std_mode_rejects_fundamental_on_non_type_targets() {
     for source in cases {
         let result = riddlec::pipeline::check_with_options(
             source,
-            riddlec::pipeline::CompileOptions { use_std: false },
+            riddlec::pipeline::CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         );
         assert!(
             result.type_result.diagnostics.iter().any(|diagnostic| {
@@ -2583,7 +2601,10 @@ fn no_std_mode_rejects_fundamental_on_non_type_targets() {
 fn no_std_mode_rejects_fundamental_values() {
     let result = riddlec::pipeline::check_with_options(
         r#"#[fundamental = "ignored"] struct Wrapper<T> { value: T }"#,
-        riddlec::pipeline::CompileOptions { use_std: false },
+        riddlec::pipeline::CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
     );
     assert!(result.type_result.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "E0053" && diagnostic.message.contains("does not accept a value")
@@ -2608,7 +2629,10 @@ fn no_std_mode_rejects_incomplete_lang_item_signatures() {
     for source in cases {
         let result = riddlec::pipeline::check_with_options(
             source,
-            riddlec::pipeline::CompileOptions { use_std: false },
+            riddlec::pipeline::CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
         );
         assert!(
             result.type_result.diagnostics.iter().any(|diagnostic| {

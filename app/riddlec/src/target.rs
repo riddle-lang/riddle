@@ -64,6 +64,21 @@ impl TargetTriple {
         }
     }
 
+    /// Width, in bits, of `size_t` on this target — the width `usize` and
+    /// `isize` are measured in, so an integer literal is range-checked against
+    /// the machine the program is built for rather than the one building it.
+    #[must_use]
+    pub const fn pointer_width_bits(self) -> u32 {
+        match self {
+            Self::I686UnknownLinuxGnu | Self::I686PcWindowsMsvc => 32,
+            Self::X86_64UnknownLinuxGnu
+            | Self::Aarch64UnknownLinuxGnu
+            | Self::X86_64PcWindowsMsvc
+            | Self::Aarch64PcWindowsMsvc
+            | Self::Aarch64AppleDarwin => 64,
+        }
+    }
+
     #[must_use]
     pub const fn is_linux(self) -> bool {
         matches!(

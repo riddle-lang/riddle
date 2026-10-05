@@ -496,6 +496,24 @@ impl LowerCtx<'_> {
         rhs: ExprId,
         op: HirBinOp,
     ) -> Value {
+        // A tuple or struct LHS is destructuring assignment: the parser accepts
+        // `(a, b) = (1, 2)` and `Point { x: a, y: b } = point` as a plain `=`,
+        // so without this case the stores went into a temporary and vanished.
+        if op == HirBinOp::Assign
+            && matches!(
+                input.body.exprs[lhs],
+                Expr::Tuple { .. } | Expr::Struct { .. }
+            )
+        {
+            let rhs_value = self.lower_expr(builder, input.param_values, input.body, rhs);
+            let rhs_ty = self
+                .current_body
+                .and_then(|body| self.type_result.expr_types.get(&(body, rhs)))
+                .cloned()
+                .unwrap_or(type_checker::Type::Unit);
+            return self.lower_destructuring_assignment(builder, input, lhs, rhs_value, &rhs_ty);
+        }
+
         let rhs_value = self.lower_expr(builder, input.param_values, input.body, rhs);
         let lhs_place = self.lower_lvalue(builder, input.param_values, input.body, lhs);
         if op != HirBinOp::Assign {
@@ -510,12 +528,26 @@ impl LowerCtx<'_> {
             return builder.unit_const();
         }
 
+        self.assign_store(builder, input.body, lhs, lhs_place, rhs_value);
+        builder.unit_const()
+    }
+
+    /// Stores `value` into `lhs_place`, first dropping the value the target
+    /// currently owns and refreshing the field-level drop flags.
+    fn assign_store(
+        &mut self,
+        builder: &mut Builder,
+        body: &Body,
+        lhs: ExprId,
+        lhs_place: Value,
+        value: Value,
+    ) {
         let lhs_ty = self
             .current_body
-            .and_then(|body| self.type_result.expr_types.get(&(body, lhs)))
+            .and_then(|body_id| self.type_result.expr_types.get(&(body_id, lhs)))
             .cloned();
         let assignment_slots = self
-            .drop_place_from_expr(input.body, lhs)
+            .drop_place_from_expr(body, lhs)
             .and_then(|(source, projection)| {
                 self.drop_slots.get(&source).map(|slots| {
                     slots
@@ -530,11 +562,11 @@ impl LowerCtx<'_> {
             })
             .unwrap_or_default();
         let raw_pointer_index = matches!(
-            &input.body.exprs[lhs],
+            &body.exprs[lhs],
             Expr::IndexAccess { base, .. }
                 if self
                     .current_body
-                    .and_then(|body| self.type_result.expr_types.get(&(body, *base)))
+                    .and_then(|body_id| self.type_result.expr_types.get(&(body_id, *base)))
                     .is_some_and(|ty| matches!(ty, type_checker::Type::Ptr { .. }))
         );
         if !raw_pointer_index
@@ -549,11 +581,66 @@ impl LowerCtx<'_> {
                 }
             }
         }
-        builder.store(rhs_value, lhs_place);
+        builder.store(value, lhs_place);
         for slot in &assignment_slots {
             let active = builder.bconst(true);
             let flag = Self::drop_slot_flag_place(builder, slot);
             builder.store(active, flag);
+        }
+    }
+
+    /// Destructuring assignment `(a, b) = (1, 2)`: stage the RHS in a
+    /// temporary (the elements may alias the targets), then store each
+    /// element into its real lvalue, reusing the drop-before-store logic of
+    /// plain assignment.
+    fn lower_destructuring_assignment(
+        &mut self,
+        builder: &mut Builder,
+        input: &ExprLoweringInput<'_>,
+        lhs: ExprId,
+        rhs_value: Value,
+        rhs_ty: &type_checker::Type,
+    ) -> Value {
+        let mir_ty = self.convert_type(rhs_ty);
+        let temp = builder.alloca(mir_ty);
+        builder.store(rhs_value, temp);
+        // Each target pairs with the right-hand component it reads: a tuple
+        // LHS is positional, a struct LHS is matched by field name, so
+        // `Point { y: b, x: a } = point` still assigns the right halves.
+        let targets = match (&input.body.exprs[lhs], rhs_ty) {
+            (Expr::Tuple { elements }, type_checker::Type::Tuple(element_types)) => elements
+                .iter()
+                .cloned()
+                .zip(element_types.iter().cloned())
+                .enumerate()
+                .map(|(index, (target, target_ty))| (target, index, target_ty))
+                .collect::<Vec<_>>(),
+            (Expr::Struct { fields, .. }, type_checker::Type::Struct(struct_id, args)) => {
+                let layout = self.struct_pattern_field_types(*struct_id, args);
+                fields
+                    .iter()
+                    .filter_map(|field| {
+                        let index = layout.iter().position(|(name, _)| *name == field.name.0)?;
+                        Some((field.value, index, layout[index].1.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            }
+            _ => return builder.unit_const(),
+        };
+        for (target, index, target_ty) in targets {
+            let mir_target = self.convert_type(&target_ty);
+            let field = builder.field_ptr(temp, index, mir_target.clone());
+            let value = builder.load(field, mir_target);
+            if matches!(
+                input.body.exprs[target],
+                Expr::Tuple { .. } | Expr::Struct { .. }
+            ) {
+                self.lower_destructuring_assignment(builder, input, target, value, &target_ty);
+            } else {
+                let target_place =
+                    self.lower_lvalue(builder, input.param_values, input.body, target);
+                self.assign_store(builder, input.body, target, target_place, value);
+            }
         }
         builder.unit_const()
     }
@@ -1592,18 +1679,29 @@ impl LowerCtx<'_> {
             && let Some(receiver) = self.hir.item_tree.functions[function].params.first()
         {
             let receiver_ty = receiver.ty.clone();
-            Some(
-                self.lower_receiver_arg(
-                    builder,
-                    input.param_values,
-                    input.body,
-                    base,
-                    &receiver_ty,
-                    base_tc_ty
-                        .and_then(|ty| self.mono_method_param_type(function, 0, ty, rhs_tc_ty))
-                        .as_ref(),
-                ),
-            )
+            let base_tc_ty = base_tc_ty.cloned();
+            let substituted = base_tc_ty
+                .as_ref()
+                .and_then(|ty| self.mono_method_param_type(function, 0, ty, rhs_tc_ty));
+            let value = self.lower_receiver_arg(
+                builder,
+                input.param_values,
+                input.body,
+                base,
+                &receiver_ty,
+                substituted.as_ref(),
+            );
+            // A slice impl's `&self` on an array receiver must arrive as the
+            // fat `&[T]` the instance reads, not the thin `&[T; N]` the
+            // receiver lowering produced.
+            let value = match base_tc_ty {
+                Some(ty) if self.receiver_takes_slice(function) => {
+                    let mutable = matches!(&receiver_ty, hir::item_tree::HirTypeRef::Ref(_, true));
+                    self.fatten_array_receiver(builder, &ty, value, mutable)
+                }
+                _ => value,
+            };
+            Some(value)
         } else {
             None
         };

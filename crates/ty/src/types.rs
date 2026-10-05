@@ -476,32 +476,69 @@ impl IntTy {
         }
     }
 
+    /// True for the signed integer types.
     #[must_use]
-    pub fn contains_u64(self, value: u64) -> bool {
+    pub const fn is_signed(self) -> bool {
+        matches!(
+            self,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::Isize
+        )
+    }
+
+    /// Width in bits. Only `usize` and `isize` vary with it, and the width that
+    /// answers them is the *target's* pointer width: the machine running the
+    /// compiler is not necessarily the machine being compiled for. `pointer_bits`
+    /// is one of the supported target widths, 32 or 64.
+    #[must_use]
+    pub const fn width_bits(self, pointer_bits: u32) -> u32 {
         match self {
-            Self::I8 => i8::try_from(value).is_ok(),
-            Self::I16 => i16::try_from(value).is_ok(),
-            Self::I32 => i32::try_from(value).is_ok(),
-            Self::I64 => i64::try_from(value).is_ok(),
-            Self::Isize => isize::try_from(value).is_ok(),
-            Self::U8 => u8::try_from(value).is_ok(),
-            Self::U16 => u16::try_from(value).is_ok(),
-            Self::U32 => u32::try_from(value).is_ok(),
-            Self::U64 => true,
-            Self::Usize => usize::try_from(value).is_ok(),
+            Self::Isize | Self::Usize => pointer_bits,
+            Self::I8 | Self::U8 => 8,
+            Self::I16 | Self::U16 => 16,
+            Self::I32 | Self::U32 => 32,
+            Self::I64 | Self::U64 => 64,
+        }
+    }
+
+    /// Largest value the type can hold.
+    #[must_use]
+    const fn max_value(self, pointer_bits: u32) -> u64 {
+        let bits = self.width_bits(pointer_bits);
+        if self.is_signed() {
+            // The widest signed type is 64 bits, so `bits - 1` never overflows.
+            (1u64 << (bits - 1)) - 1
+        } else if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
+    }
+
+    /// The inclusive `(min, max)` value range of the type.
+    #[must_use]
+    pub const fn value_range(self, pointer_bits: u32) -> (i128, i128) {
+        let max = self.max_value(pointer_bits) as i128;
+        if self.is_signed() {
+            (-(max + 1), max)
+        } else {
+            (0, max)
         }
     }
 
     #[must_use]
-    pub const fn contains_negative_magnitude(self, value: u64) -> bool {
-        match self {
-            Self::I8 => value <= (i8::MAX as u64) + 1,
-            Self::I16 => value <= (i16::MAX as u64) + 1,
-            Self::I32 => value <= (i32::MAX as u64) + 1,
-            Self::I64 => value <= (i64::MAX as u64) + 1,
-            Self::Isize => value <= (isize::MAX as u64) + 1,
-            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::Usize => false,
+    pub const fn contains_u64(self, value: u64, pointer_bits: u32) -> bool {
+        value <= self.max_value(pointer_bits)
+    }
+
+    /// True when `-value` is representable, the check a negatively written
+    /// literal needs. An unsigned type holds no negative value at all, however
+    /// small the magnitude.
+    #[must_use]
+    pub const fn contains_negative_magnitude(self, value: u64, pointer_bits: u32) -> bool {
+        if !self.is_signed() {
+            return false;
         }
+        value <= self.max_value(pointer_bits) + 1
     }
 }
 

@@ -140,15 +140,3 @@ path = "tests/scope_graph/main.rs"
 [[test]]
 name = "type_checker"
 path = "tests/type_checker/main.rs"
-
-[[bench]]
-name = "interpreter"
-path = "benches/interpreter.rs"
-harness = false
-
-[[bench]]
-# Measures editor latency: one keystroke's worth of completion over a real
-# Clue project, plus the analysis it triggers.
-name = "lsp_completion"
-path = "benches/lsp_completion.rs"
-harness = false

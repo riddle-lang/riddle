@@ -12,7 +12,10 @@ fn hierarchy_index(name: &str, source: &str) -> (PathBuf, ProjectIndex) {
     let index = project_index_for_root(
         &root,
         &HashMap::new(),
-        CompileOptions { use_std: false },
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
         &AnalysisSessions::default(),
     )
     .unwrap()

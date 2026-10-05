@@ -459,11 +459,22 @@ impl LoadedSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompileOptions {
     pub use_std: bool,
+    /// Pointer width, in bits, that `usize` and `isize` are measured in.
+    ///
+    /// Literals are range-checked against it, so it has to be the width of the
+    /// machine being compiled for rather than the width of the machine running
+    /// the compiler: `riddlec --target i686-*` on an x86_64 host produces a
+    /// 32-bit `size_t`, and the same host running the MIR interpreter produces
+    /// an 8-byte word regardless of its own width.
+    pub pointer_width_bits: u32,
 }
 
 impl Default for CompileOptions {
     fn default() -> Self {
-        Self { use_std: true }
+        Self {
+            use_std: true,
+            pointer_width_bits: usize::BITS,
+        }
     }
 }
 
@@ -1217,8 +1228,20 @@ pub fn compile(source: &str) -> CompileResult {
 /// sites back to `user_path` (rewritten through standard-macro expansion)
 /// and the appended std region — the source files the interpreter needs to
 /// render panic locations for `riddle run` and `riddle repl`.
+///
+/// `usize` and `isize` are checked at the interpreter's own width, one 8-byte
+/// word on every host (`crates/interpreter/src/mem.rs::int_size`), because that
+/// is the machine this result runs on: a host of a different width must not
+/// make a representable value look like an out-of-range literal. Codegen for a
+/// C target instead narrows this to the target's `size_t` (`--target`).
 pub fn compile_for_interpretation(source: &str, user_path: &str) -> CompileResult {
-    let mut result = compile(source);
+    let mut result = compile_with_options(
+        source,
+        CompileOptions {
+            pointer_width_bits: 64,
+            ..CompileOptions::default()
+        },
+    );
     for file in &mut result.source_files {
         if file.path == USER_SOURCE_PATH {
             file.path = user_path.to_string();
@@ -1746,6 +1769,7 @@ fn run_pipeline_with_state_cancellable_and_names(
         .map(|range| text_range(range.start, range.end))
         .collect();
     hir.std_loaded = options.use_std;
+    hir.pointer_width_bits = options.pointer_width_bits;
 
     // 3. Build scope graph + resolve names
     let (sg, scope_diagnostics) = build_scope_graph(&hir, &syntax);

@@ -42,6 +42,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, clap::Error> {
     Ok(Options {
         compile_options: CompileOptions {
             use_std: !args.no_std,
+            ..Default::default()
         },
         completion_delay: Duration::from_millis(args.completion_delay_ms),
         trace_latency: args.trace_latency,

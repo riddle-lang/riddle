@@ -986,6 +986,11 @@ int riddle_fs_fclose(size_t stream) {
 size_t riddle_fs_fread(void *buffer, size_t size, size_t count, size_t stream) {
     return fread(buffer, size, count, (FILE *)(uintptr_t)stream);
 }
+/* fread returns a short count for EOF and for failure alike; this reports the
+   stream's error indicator so std::fs can tell the two apart. */
+int riddle_fs_ferror(size_t stream) {
+    return ferror((FILE *)(uintptr_t)stream);
+}
 size_t riddle_fs_fwrite(void *buffer, size_t size, size_t count, size_t stream) {
     return fwrite(buffer, size, count, (FILE *)(uintptr_t)stream);
 }

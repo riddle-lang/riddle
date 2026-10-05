@@ -50,11 +50,29 @@ struct DocPage {
 
 pub fn generate(
     root: &Path,
+    package: Option<&str>,
     document_private: bool,
     open: bool,
     no_std: bool,
 ) -> anyhow::Result<PathBuf> {
-    let options = riddlec::pipeline::CompileOptions { use_std: !no_std };
+    let root = if let Some(name) = package {
+        let selected = crate::selected_target_packages(root, Some(name), false)?;
+        selected
+            .into_iter()
+            .next()
+            .with_context(|| format!("clue doc: no package named `{name}`"))?
+    } else {
+        root.to_path_buf()
+    };
+    let root = root.as_path();
+    // Documentation has to be checked at the same pointer width a build of
+    // this project would use, or an integer literal that only fits a 64-bit
+    // `size_t` would pass `clue doc` and fail `clue build`.
+    let triple = crate::target::resolve(None, None)?;
+    let options = riddlec::pipeline::CompileOptions {
+        use_std: !no_std,
+        ..crate::analysis_options(triple)
+    };
     let analysis = crate::check_project_with_options(root, &HashMap::new(), options)?;
     let hir = analysis
         .result

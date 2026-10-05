@@ -79,15 +79,6 @@ fn build_multiple_blocks() {
 }
 
 #[test]
-fn pointer_sized_types_follow_target_architecture() {
-    let pointer_size = std::mem::size_of::<usize>();
-
-    assert_eq!(Type::Int(IntTy::Isize).size_bytes(), pointer_size);
-    assert_eq!(Type::Int(IntTy::Usize).size_bytes(), pointer_size);
-    assert_eq!(Type::Ptr(Box::new(Type::Unit)).size_bytes(), pointer_size);
-}
-
-#[test]
 fn string_const_is_shared_str_ref() {
     let mut func = Function::new("test".into(), Type::Unit);
     let mut builder = Builder::new(&mut func);

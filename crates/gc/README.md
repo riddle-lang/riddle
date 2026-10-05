@@ -31,6 +31,15 @@ runtime forwards to `rgc_alloc(size, NULL)` (so that payload is scanned
 conservatively) and the allocator-only runtime forwards to `riddle_alloc`.
 The name is neutral because one std declaration has to compile against either
 runtime, and the allocator-only runtime must not reference any `rgc_` symbol.
+
+The runtimes measure time and sleep with `clock_gettime(CLOCK_MONOTONIC)` and
+`nanosleep`, which glibc hides unless `_POSIX_C_SOURCE` is at least `199309L`.
+Each runtime source asks for that, but a feature-test macro only counts when
+it precedes the translation unit's first system header, so anything that
+concatenates a runtime into a file that already included one (a test harness,
+a single-file build) has to emit the same guard at the very top. Clue compiles
+the runtime as its own translation unit and the C backend emits the guard in
+its prologue, which is why only hand-rolled concatenation is affected.
 ## Layout descriptors
 
 The second argument of `rgc_alloc` is a flat `uint32_t` array published

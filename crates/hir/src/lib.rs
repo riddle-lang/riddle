@@ -40,6 +40,11 @@ pub struct HirFile {
     pub std_loaded: bool,
     /// Documentation comments attached to syntax nodes, kept in source order.
     pub doc_comments: Vec<(TextRange, Vec<String>)>,
+    /// Pointer width, in bits, that `usize` and `isize` are measured in.
+    /// Lowering cannot know which machine is being compiled for, so it starts
+    /// out as the host's width and the frontend overwrites it with the selected
+    /// target's before anything is checked.
+    pub pointer_width_bits: u32,
 }
 
 #[must_use]
@@ -70,6 +75,7 @@ pub fn lower_root(root: &Root) -> HirFile {
         package_ranges: vec![package_range],
         std_loaded: false,
         doc_comments,
+        pointer_width_bits: usize::BITS,
     };
 
     let top = lower_items(&mut hir, root.stmts().collect());

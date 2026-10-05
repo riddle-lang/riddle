@@ -533,7 +533,13 @@ pub fn rename_for_source(
 #[cfg(feature = "test")]
 #[must_use]
 pub fn signature_help_for_source(source: &str, position: Position) -> Option<SignatureHelp> {
-    let analysis = standalone_analysis(source, CompileOptions { use_std: false });
+    let analysis = standalone_analysis(
+        source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    );
     signature_help_from_analysis(source, &analysis, position)
 }
 
@@ -543,8 +549,15 @@ pub fn document_highlights_for_source(
     source: &str,
     position: Position,
 ) -> Option<Vec<DocumentHighlight>> {
-    let locations =
-        references_for_source(source, position, true, CompileOptions { use_std: false })?;
+    let locations = references_for_source(
+        source,
+        position,
+        true,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+    )?;
     Some(
         locations
             .into_iter()

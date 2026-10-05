@@ -723,16 +723,54 @@ impl TypeChecker<'_> {
         methods
     }
 
+    /// Matches an impl's `Self` against the type a method receiver presents as
+    /// `Self`, recording the impl's generic substitutions and `Self` together
+    /// with the bounds the enclosing function assumes.
+    fn impl_subst_for_self_ty(
+        &mut self,
+        imp: &hir::item_tree::HirImpl,
+        receiver_self_ty: &Type,
+        ctx: &BodyCtx<'_>,
+    ) -> Option<HashMap<String, Type>> {
+        let mut subst = self.impl_subst_from_self_ty(imp, receiver_self_ty)?;
+        let assumptions = self.current_trait_assumptions(ctx);
+        if !self.impl_bounds_satisfied(imp, &subst, &assumptions) {
+            return None;
+        }
+        subst.insert("Self".into(), receiver_self_ty.clone());
+        Some(subst)
+    }
+
+    /// Looks a method up by receiver type. An impl can spell `Self` as a
+    /// reference (`impl Clone for &str`), which a borrowed receiver only reaches
+    /// by borrowing itself, so the pointee is searched first and the receiver as
+    /// written second: otherwise `self.cmp(other)` inside
+    /// `impl PartialOrd for Ordering` would land on the blanket
+    /// `impl Ord for &T` — declared earlier, so it would win a single pass —
+    /// and demand a `&&Ordering` argument. Rust orders the same way, trying the
+    /// receiver's own type before the autoref step.
     pub(super) fn find_inherent_method(
         &mut self,
         ctx: &BodyCtx<'_>,
         receiver_ty: &Type,
         method_name: &Name,
     ) -> Result<Option<ResolvedMethod>, MethodLookupError> {
-        let receiver_self_ty = match receiver_ty {
-            Type::Ref(inner, _) => inner.as_ref(),
-            other => other,
-        };
+        for receiver_self_ty in receiver_self_types(receiver_ty) {
+            if let Some(method) =
+                self.find_inherent_method_for_self_ty(ctx, receiver_self_ty, method_name)?
+            {
+                return Ok(Some(method));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_inherent_method_for_self_ty(
+        &mut self,
+        ctx: &BodyCtx<'_>,
+        receiver_self_ty: &Type,
+        method_name: &Name,
+    ) -> Result<Option<ResolvedMethod>, MethodLookupError> {
         let impls = self
             .hir
             .item_tree
@@ -746,14 +784,9 @@ impl TypeChecker<'_> {
             if imp.trait_ty.is_some() {
                 continue;
             }
-            let Some(mut subst) = self.impl_subst_from_self_ty(&imp, receiver_self_ty) else {
+            let Some(subst) = self.impl_subst_for_self_ty(&imp, receiver_self_ty, ctx) else {
                 continue;
             };
-            let assumptions = self.current_trait_assumptions(ctx);
-            if !self.impl_bounds_satisfied(&imp, &subst, &assumptions) {
-                continue;
-            }
-            subst.insert("Self".into(), receiver_self_ty.clone());
             for fid in imp.methods {
                 let function = &self.hir.item_tree.functions[fid];
                 if function.name == *method_name {
@@ -788,10 +821,19 @@ impl TypeChecker<'_> {
         receiver_ty: &Type,
         method_name: &Name,
     ) -> Option<ResolvedMethod> {
-        let receiver_self_ty = match receiver_ty {
-            Type::Ref(inner, _) => inner.as_ref(),
-            other => other,
-        };
+        receiver_self_types(receiver_ty)
+            .into_iter()
+            .find_map(|receiver_self_ty| {
+                self.find_trait_impl_method_for_self_ty(ctx, receiver_self_ty, method_name)
+            })
+    }
+
+    fn find_trait_impl_method_for_self_ty(
+        &mut self,
+        ctx: &BodyCtx<'_>,
+        receiver_self_ty: &Type,
+        method_name: &Name,
+    ) -> Option<ResolvedMethod> {
         let impls = self
             .hir
             .item_tree
@@ -807,14 +849,9 @@ impl TypeChecker<'_> {
             let Some(trait_id) = self.resolve_trait_ref(trait_ty) else {
                 continue;
             };
-            let Some(mut subst) = self.impl_subst_from_self_ty(&imp, receiver_self_ty) else {
+            let Some(mut subst) = self.impl_subst_for_self_ty(&imp, receiver_self_ty, ctx) else {
                 continue;
             };
-            let assumptions = self.current_trait_assumptions(ctx);
-            if !self.impl_bounds_satisfied(&imp, &subst, &assumptions) {
-                continue;
-            }
-            subst.insert("Self".into(), receiver_self_ty.clone());
             self.seed_trait_generic_defaults(trait_id, &mut subst);
             let fid = imp
                 .methods
@@ -1434,5 +1471,15 @@ impl TypeChecker<'_> {
             }
             _ => None,
         }
+    }
+}
+
+/// The types a method receiver can present as `Self`, in lookup order: the
+/// pointee of a borrow first, then the receiver as written so an impl spelling
+/// `Self` as a reference (`impl Clone for &str`) is reachable.
+fn receiver_self_types(receiver_ty: &Type) -> Vec<&Type> {
+    match receiver_ty {
+        Type::Ref(inner, _) => vec![inner.as_ref(), receiver_ty],
+        _ => vec![receiver_ty],
     }
 }

@@ -114,7 +114,14 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
 #[cfg(feature = "test")]
 #[must_use]
 pub fn semantic_tokens_for_source(source: &str) -> SemanticTokens {
-    semantic_tokens_for_source_with_options(source, CompileOptions { use_std: false }, false)
+    semantic_tokens_for_source_with_options(
+        source,
+        CompileOptions {
+            use_std: false,
+            ..Default::default()
+        },
+        false,
+    )
 }
 
 #[cfg(feature = "test")]

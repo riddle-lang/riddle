@@ -780,6 +780,7 @@ impl LowerCtx<'_> {
             .find(|fid| self.hir.item_tree.functions[*fid].name.0 == method_name)
     }
 
+    #[track_caller]
     pub(super) fn lower_receiver_arg(
         &mut self,
         builder: &mut Builder,
@@ -842,6 +843,42 @@ impl LowerCtx<'_> {
             }
             _ => self.lower_expr(builder, param_values, body, base),
         }
+    }
+
+    /// Widens a thin `&[T; N]` receiver into the fat `&[T]` a slice method
+    /// takes. The checker records the array→slice coercion only for
+    /// expected-type expressions, never for method receivers, so a call like
+    /// `a.len()` on an array value arrives here as a thin pointer, which the C
+    /// backend rejects where `riddle_slice` is expected.
+    pub(super) fn fatten_array_receiver(
+        &mut self,
+        builder: &mut Builder,
+        base_ty: &type_checker::Type,
+        value: Value,
+        mutable: bool,
+    ) -> Value {
+        let base_ty = self.substitute_tc_type(base_ty);
+        let type_checker::Type::Array(element, type_checker::ConstArg::Value(count)) = base_ty
+        else {
+            return value;
+        };
+        let element = self.convert_type(&element);
+        let len = builder.iconst(count as u64, IntTy::Usize);
+        let slice_ty = Type::Ref(Box::new(Type::Slice(Box::new(element))), mutable);
+        let value = builder.struct_value(vec![value, len], slice_ty.clone());
+        self.coerced_values.insert((value, slice_ty));
+        value
+    }
+
+    /// True when a method belongs to an `impl [T]` block, i.e. its `&self`
+    /// receiver is a slice reference whatever the declaration spells it as.
+    pub(super) fn receiver_takes_slice(&self, fid: hir::item_tree::FunctionId) -> bool {
+        self.method_impls.get(&fid).is_some_and(|iid| {
+            matches!(
+                self.hir.item_tree.impls[*iid].self_ty,
+                hir::item_tree::HirTypeRef::Slice(_)
+            )
+        })
     }
 
     pub(super) fn lower_trait_index_place(

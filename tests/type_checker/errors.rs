@@ -1555,3 +1555,112 @@ fn leading_pipe_arm_behaves_like_the_plain_pattern() {
 
     assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
 }
+
+#[test]
+fn rejects_function_declared_without_body() {
+    // A semicolon declaration lowers to no MIR function, so a call would only
+    // fail at runtime as "call to unknown function".
+    let result = check(
+        r"
+        fun helper() -> i32;
+
+        fun main() -> i32 { helper() }
+        ",
+    );
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E0015" && diagnostic.message.contains("helper")
+        }),
+        "{:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn accepts_extern_declaration_without_body() {
+    let result = check(
+        r#"
+        unsafe extern "C" {
+            fun host_probe(value: i32) -> i32;
+        }
+
+        fun main() -> i32 {
+            unsafe { host_probe(1) }
+        }
+        "#,
+    );
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0015"),
+        "extern declarations have no body by design: {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn accepts_negative_float_string_and_char_constants() {
+    let result = check(
+        r#"
+        const NEG: i32 = -1;
+        const HALF: f64 = 2.5;
+        const NAME: &str = "riddle";
+        const FLAG: char = 'a';
+
+        fun main() -> i32 {
+            let sum = NEG + 1;
+            let scaled = HALF * 2.0;
+            let _ = (sum, scaled, NAME, FLAG);
+            0
+        }
+        "#,
+    );
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0060"),
+        "constant initializers the evaluator cannot fold to an integer are still constants: {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn reports_negative_value_out_of_range_for_unsigned_constant() {
+    let result = check(
+        r"
+        const SIZE: usize = 0 - 1;
+
+        fun main() -> usize { SIZE }
+        ",
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "E0011" && diagnostic.message.contains("-1") }),
+        "expected E0011 naming the negative value, got {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn accepts_self_in_inherent_return_position() {
+    let result = check(
+        r"
+        struct Point { x: i32 }
+
+        impl Point {
+            fun make(x: i32) -> Self {
+                Point { x: x }
+            }
+        }
+
+        fun main() -> i32 {
+            Point::make(3).x
+        }
+        ",
+    );
+    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+}

@@ -67,6 +67,21 @@ impl Hash for usize {
     }
 }
 
+// String keys arrive as `&str` slices, so `&str` needs its own impl; without
+// it `HashMap<&str, V>` fails the `Hash` bound at the call site. The fold is
+// the same FNV-1a `String` uses, so both spellings of the same text hash
+// alike.
+impl Hash for &str {
+    fun hash(&self) -> usize {
+        let text: &str = *self;
+        let mut value = 1469598103934665603u64;
+        for byte in text.as_bytes() {
+            value = (value ^ (*byte as u64)) * 1099511628211u64;
+        }
+        value as usize
+    }
+}
+
 // Floats hash their bit pattern: a value cast (`as`) would truncate instead
 // of reinterpreting, collapsing every fraction below 1.0 onto the same hash.
 // `-0.0` and `0.0` compare equal yet hash apart, which is safe only because

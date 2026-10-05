@@ -2719,3 +2719,92 @@ fn loop_carried_reference_through_recursive_type_converges() {
     );
     assert_eq!(result.diagnostics, vec![]);
 }
+
+#[test]
+fn let_destructuring_moves_only_the_bound_fields() {
+    // `match` arms already move exactly the fields a pattern binds; a `let`
+    // pattern must not poison the whole value, or `pair.tag` after moving
+    // `pair.payload` would be rejected.
+    let result = analyze(
+        r"
+        struct Payload { count: i32 }
+        struct Pair { payload: Payload, tag: i32 }
+
+        fun f(pair: Pair) -> i32 {
+            let Pair { payload } = pair;
+            payload.count + pair.tag
+        }
+        ",
+    );
+    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+}
+
+#[test]
+fn let_destructuring_still_blocks_the_moved_field() {
+    let result = analyze(
+        r"
+        struct Payload { count: i32 }
+        struct Pair { payload: Payload, tag: i32 }
+
+        fun f(pair: Pair) -> i32 {
+            let Pair { payload } = pair;
+            pair.payload.count
+        }
+        ",
+    );
+    assert!(
+        result.diagnostics.iter().any(|d| d.code == "E0100"),
+        "expected E0100 for reading the moved field, got {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn let_move_of_a_whole_value_still_blocks_every_field() {
+    let result = analyze(
+        r"
+        struct Payload { count: i32 }
+        struct Pair { payload: Payload, tag: i32 }
+
+        fun f(pair: Pair) -> i32 {
+            let moved = pair;
+            pair.tag
+        }
+        ",
+    );
+    assert!(
+        result.diagnostics.iter().any(|d| d.code == "E0100"),
+        "expected E0100 for using a wholly moved value, got {:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn a_block_tail_moves_the_local_it_returns() {
+    // The block's value outlives the block's locals, so the tail read moves
+    // `pair` even where the block result is only passed on; MIR gives that
+    // result its own drop glue, and leaving the source armed would free the
+    // buffer twice.
+    let result = analyze(
+        r"
+        struct Payload { count: i32 }
+        struct Pair { payload: Payload }
+
+        fun take(pair: Pair) -> i32 {
+            pair.payload.count
+        }
+
+        fun f() -> i32 {
+            let pair = Pair { payload: Payload { count: 1 } };
+            let first = take({ pair });
+            let second = pair.payload.count;
+            first + second
+        }
+        ",
+    );
+    assert!(
+        result.diagnostics.iter().any(|d| d.code == "E0100"),
+        "expected E0100 for reading a local moved by a block tail, got {:#?}",
+        result.diagnostics
+    );
+}

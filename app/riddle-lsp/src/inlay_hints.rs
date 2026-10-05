@@ -19,7 +19,14 @@ use syntax::SyntaxKind;
 pub fn inlay_hints_for_source(source: &str, range: Range) -> Vec<InlayHint> {
     let mut session = riddlec::pipeline::CheckSession::new();
     let result = session
-        .infer_with_options_cancellable(source, CompileOptions { use_std: false }, || false)
+        .infer_with_options_cancellable(
+            source,
+            CompileOptions {
+                use_std: false,
+                ..Default::default()
+            },
+            || false,
+        )
         .expect("inference should not be cancelled");
     inlay_hints_from_analysis(
         source,

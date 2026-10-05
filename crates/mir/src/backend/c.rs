@@ -2102,7 +2102,15 @@ fn c_negative_int_literal(magnitude: u64, ty: &Type) -> String {
         Type::Int(IntTy::I16) if magnitude == 1 << 15 => Some("INT16_MIN"),
         Type::Int(IntTy::I32) if magnitude == 1 << 31 => Some("INT32_MIN"),
         Type::Int(IntTy::I64) if magnitude == 1 << 63 => Some("INT64_MIN"),
-        Type::Int(IntTy::Isize) if magnitude == 1 << (usize::BITS - 1) => Some("PTRDIFF_MIN"),
+        // `ptrdiff_t` is whatever the C compiler is targeting, so its minimum is
+        // 2^31 on a 32-bit target and 2^63 on a 64-bit one. Both deserve the
+        // macro: the width of the machine running this compiler says nothing
+        // about which one the generated program gets. Emitting
+        // `-INT64_C(9223372036854775808)` instead would be an overflowing
+        // constant expression in C.
+        Type::Int(IntTy::Isize) if magnitude == 1 << 31 || magnitude == 1 << 63 => {
+            Some("PTRDIFF_MIN")
+        }
         _ => None,
     };
     minimum.map_or_else(

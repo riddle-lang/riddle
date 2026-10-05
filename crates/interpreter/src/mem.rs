@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mir::types::{EnumVariantKind, Type};
 use mir::value::FuncRef;
@@ -124,6 +124,18 @@ const fn int_size(ty: mir::types::IntTy) -> usize {
 /// memory.
 pub struct Memory {
     allocs: Vec<Box<[u8]>>,
+    // Blocks released as a frame or an owned value died, kept so a stale
+    // pointer reports use-after-free until the id is handed out again.
+    freed: HashSet<u32>,
+    // Released ids, reused by the next allocation so the slot table stops
+    // growing on long-running sessions, like a C stack reusing frame memory.
+    idle: Vec<u32>,
+    // Heap blocks outlive the call that created them, so frame release must
+    // skip them and only an explicit free may drop them.
+    heap: HashSet<u32>,
+    // Interned string literals behave like the C backend's static buffers:
+    // reachable from any frame and never freed.
+    statics: HashSet<u32>,
     strings: HashMap<String, u64>,
     fnptrs: Vec<FuncRef>,
     fnptr_ids: HashMap<FuncRef, u64>,
@@ -141,6 +153,10 @@ impl Memory {
             // Allocation id 0 stays unused so no real pointer ever collides
             // with the null pointer bit pattern.
             allocs: vec![Box::<[u8]>::default()],
+            freed: HashSet::new(),
+            idle: Vec::new(),
+            heap: HashSet::new(),
+            statics: HashSet::new(),
             strings: HashMap::new(),
             // Id 0 is reserved as the null function pointer.
             fnptrs: vec![FuncRef::Extern(String::new())],
@@ -148,18 +164,72 @@ impl Memory {
         }
     }
 
+    fn block(&mut self, bytes: &[u8]) -> u64 {
+        let id = match self.idle.pop() {
+            Some(id) => {
+                self.freed.remove(&id);
+                self.allocs[id as usize] = bytes.to_vec().into_boxed_slice();
+                id
+            }
+            None => {
+                let id = u32::try_from(self.allocs.len()).expect("allocation count overflow");
+                self.allocs.push(bytes.to_vec().into_boxed_slice());
+                id
+            }
+        };
+        make_ptr(id, 0)
+    }
+
     /// Allocates a zeroed block and returns its base pointer bits.
     pub fn alloc(&mut self, size: usize) -> u64 {
-        let id = u32::try_from(self.allocs.len()).expect("allocation count overflow");
-        self.allocs.push(vec![0; size].into_boxed_slice());
-        make_ptr(id, 0)
+        self.block(&vec![0u8; size])
+    }
+
+    /// Allocates a frame-scoped block like `alloc`, and reports the id so the
+    /// owning activation can hand the storage back when it returns.
+    pub fn alloc_slot(&mut self, size: usize) -> (u32, u64) {
+        let ptr = self.alloc(size);
+        (ptr_parts(ptr).0, ptr)
+    }
+
+    /// Allocates a block that outlives the call which created it, so it is
+    /// released only by `free`.
+    pub fn heap_alloc(&mut self, size: usize) -> u64 {
+        let ptr = self.block(&vec![0u8; size]);
+        self.heap.insert(ptr_parts(ptr).0);
+        ptr
+    }
+
+    /// Releases `bits` when it addresses a live heap block at its start.
+    /// Null pointers, stack blocks, interned literals, interior pointers and
+    /// already-released blocks are ignored, matching `rgc_free`, which drops
+    /// anything `rgc_find_exact` does not recognize as an object.
+    pub fn free(&mut self, bits: u64) {
+        let (id, offset) = ptr_parts(bits);
+        if offset == 0 && self.heap.remove(&id) {
+            self.release(id);
+        }
+    }
+
+    /// Releases frame-scoped blocks taken from `slots`. Storage for promoted
+    /// values and interned text is not listed here, so it survives.
+    pub fn release_slots(&mut self, slots: &[u32]) {
+        for &id in slots {
+            self.release(id);
+        }
+    }
+
+    fn release(&mut self, id: u32) {
+        self.allocs[id as usize] = Box::<[u8]>::default();
+        self.freed.insert(id);
+        self.idle.push(id);
     }
 
     /// Allocates a block filled with `bytes`.
     pub fn alloc_bytes(&mut self, bytes: &[u8]) -> u64 {
-        let id = u32::try_from(self.allocs.len()).expect("allocation count overflow");
-        self.allocs.push(bytes.to_vec().into_boxed_slice());
-        make_ptr(id, 0)
+        let ptr = self.block(bytes);
+        self.statics.insert(ptr_parts(ptr).0);
+        ptr
     }
 
     /// Returns a stable pointer to a copy of `text`'s bytes, interning
@@ -201,6 +271,9 @@ impl Memory {
             return Err("null pointer dereference".into());
         }
         let (alloc, offset) = ptr_parts(bits);
+        if self.freed.contains(&alloc) {
+            return Err(format!("dangling pointer to released allocation {alloc}"));
+        }
         let offset = offset as usize;
         let bytes = self
             .allocs
@@ -397,5 +470,74 @@ pub fn zero_val(ty: &Type) -> Val {
             (0..*count).map(|_| zero_val(inner)).collect(),
         )),
         Type::Unit | Type::Never | Type::Void => Val::Unit,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_releases_heap_storage_and_recycles_the_id() {
+        let mut mem = Memory::new();
+        let ptr = mem.heap_alloc(4096);
+        let (id, _) = ptr_parts(ptr);
+        assert_eq!(mem.allocation_len(id as usize), 4096);
+
+        mem.free(ptr);
+        assert_eq!(mem.allocation_len(id as usize), 0);
+
+        // The slot is handed back out instead of growing the table forever.
+        let reused = mem.alloc(16);
+        assert_eq!(ptr_parts(reused).0, id);
+        assert_eq!(mem.allocation_len(id as usize), 16);
+    }
+
+    #[test]
+    fn free_ignores_storage_the_program_does_not_own() {
+        let mut mem = Memory::new();
+        let block = mem.heap_alloc(32);
+        let literal = mem.intern_str("literal");
+        let (literal_id, _) = ptr_parts(literal);
+
+        mem.free(0); // null
+        mem.free(block + 8); // interior pointer
+        mem.free(literal); // interned text, static in the C backend
+        mem.free(block); // the only owned pointer
+
+        assert!(mem.read_bytes(literal, 7).is_ok());
+        assert_eq!(mem.allocation_len(literal_id as usize), 7);
+        assert!(mem.read_bytes(block, 32).is_err());
+        // Releasing twice is ignored, like `rgc_free` on a pointer
+        // `rgc_find_exact` no longer resolves.
+        mem.free(block);
+    }
+
+    #[test]
+    fn released_stale_pointer_reports_use_after_free() {
+        let mut mem = Memory::new();
+        let block = mem.heap_alloc(16);
+        mem.free(block);
+        let error = mem
+            .read_bytes(block, 4)
+            .expect_err("stale pointer must fail");
+        assert!(
+            error.contains("released allocation"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn release_slots_keeps_heap_blocks_and_literals_alive() {
+        let mut mem = Memory::new();
+        let (slot, stack) = mem.alloc_slot(64);
+        let heap = mem.heap_alloc(128);
+        let literal = mem.intern_str("keep me");
+
+        mem.release_slots(&[slot]);
+
+        assert!(mem.read_bytes(heap, 128).is_ok());
+        assert!(mem.read_bytes(literal, 7).is_ok());
+        assert!(mem.read_bytes(stack, 1).is_err());
     }
 }
