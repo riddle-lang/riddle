@@ -2824,20 +2824,26 @@ impl Analyzer<'_> {
                 })
             })
             .cloned();
-        let result = summary.as_ref().map_or_else(
-            || {
-                if may_carry_reference {
-                    let mut result = OriginValue::default();
-                    for value in &prepared {
-                        result.merge(value.flattened());
+        // Summaries also carry provenance through raw pointers and generic
+        // values. Only reference-bearing return types retain caller loans;
+        // storage effects are applied independently below.
+        let result = summary
+            .as_ref()
+            .filter(|_| may_carry_reference)
+            .map_or_else(
+                || {
+                    if may_carry_reference {
+                        let mut result = OriginValue::default();
+                        for value in &prepared {
+                            result.merge(value.flattened());
+                        }
+                        result
+                    } else {
+                        OriginValue::default()
                     }
-                    result
-                } else {
-                    OriginValue::default()
-                }
-            },
-            |summary| self.instantiate_call_summary(ctx, summary, &prepared, inputs, span),
-        );
+                },
+                |summary| self.instantiate_call_summary(ctx, summary, &prepared, inputs, span),
+            );
 
         let storage_summary = summary.or_else(|| self.dynamic_trait_summary(ctx, call).cloned());
         let stored_loans = storage_summary

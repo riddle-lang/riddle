@@ -40,6 +40,28 @@
 
 use crate::analyze;
 
+#[test]
+fn proc_macro_standard_library_owned_results_do_not_retain_borrows() {
+    // Proc-macro hosts inject their API as package source, so its bodies are
+    // checked rather than using the cached standard-library check.
+    let result = riddlec::pipeline::check_with_options(
+        concat!(
+            include_str!("../../std/std/proc_macro.rid"),
+            "\n",
+            include_str!("../../std/std/syn.rid"),
+        ),
+        riddlec::pipeline::CompileOptions::default(),
+    );
+    assert!(
+        result.success(),
+        "parse: {:#?}\nhir: {:#?}\ntypes: {:#?}\nborrows: {:#?}",
+        result.parse_errors,
+        result.hir_diagnostics,
+        result.type_result.diagnostics,
+        result.analysis_diagnostics,
+    );
+}
+
 fn assert_has_code(result: &move_checker::AnalysisResult, code: &str) {
     assert!(
         result.diagnostics.iter().any(|d| d.code == code),
