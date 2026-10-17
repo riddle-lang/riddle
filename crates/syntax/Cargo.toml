@@ -1,9 +1,7 @@
 [package]
-name = "syntax"
+name = "riddle-syntax"
 version.workspace = true
 edition.workspace = true
-publish = false
 
 [dependencies]
-logos = "0.16"
-rowan = "0.16.1"
+rowan.workspace = true

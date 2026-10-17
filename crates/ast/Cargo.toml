@@ -1,9 +1,8 @@
 [package]
-name = "ast"
+name = "riddle-ast"
 version.workspace = true
 edition.workspace = true
-publish = false
 
 [dependencies]
-rowan = "0.16.1"
-syntax = { path = "../syntax" }
+riddle-syntax.workspace = true
+rowan.workspace = true

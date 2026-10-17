@@ -1,7 +1,0 @@
-pub trait Into<T> {
-    fun into(self) -> T;
-}
-
-pub trait From<T> {
-    fun from(value: T) -> Self;
-}

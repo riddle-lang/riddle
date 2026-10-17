@@ -1,142 +1,16 @@
 [workspace]
-resolver = "2"
-members = [
-    "app/clue",
-    "app/riddle-lsp",
-    "app/riddlec",
-    "crates/ast",
-    "crates/escape-analysis",
-    "crates/frontend",
-    "crates/gc",
-    "crates/hir",
-    "crates/interpreter",
-    "crates/mir",
-    "crates/move-checker",
-    "crates/scope-graph",
-    "crates/syntax",
-    "crates/ty",
-    "crates/type-checker",
-]
-default-members = [
-    ".",
-    "app/clue",
-    "app/riddle-lsp",
-    "app/riddlec",
-    "crates/ast",
-    "crates/escape-analysis",
-    "crates/frontend",
-    "crates/gc",
-    "crates/hir",
-    "crates/interpreter",
-    "crates/mir",
-    "crates/move-checker",
-    "crates/scope-graph",
-    "crates/syntax",
-    "crates/ty",
-    "crates/type-checker",
-]
+resolver = "3"
+members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.1.0"
 edition = "2024"
 
-[package]
-name = "riddle"
-version.workspace = true
-edition.workspace = true
-publish = false
-autotests = false
-default-run = "riddle"
-
-[lib]
-name = "riddle"
-path = "app/riddle/src/lib.rs"
-
-[dependencies]
-clap = { version = "=4.5.61", features = ["derive", "string"] }
-clue = { path = "app/clue" }
-ctrlc = "3.4"
-interpreter = { path = "crates/interpreter" }
-mir = { path = "crates/mir" }
-riddlec = { path = "app/riddlec" }
-riddle-lsp = { path = "app/riddle-lsp" }
-rustyline = "17"
-type-checker = { path = "crates/type-checker" }
-tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync", "time"] }
-
-[features]
-install-bins = []
-
-[[bin]]
-name = "clue"
-path = "app/clue/src/main.rs"
-required-features = ["install-bins"]
-
-[[bin]]
-name = "riddle-lsp"
-path = "app/riddle-lsp/src/main.rs"
-required-features = ["install-bins"]
-
-[[bin]]
-name = "riddlec"
-path = "app/riddlec/src/main.rs"
-required-features = ["install-bins"]
-
-[[bin]]
-name = "riddle"
-path = "app/riddle/src/main.rs"
-
-[dev-dependencies]
-ast = { path = "crates/ast" }
-criterion = "0.8.2"
-escape-analysis = { path = "crates/escape-analysis" }
-frontend = { path = "crates/frontend" }
-gc = { path = "crates/gc" }
-hir = { path = "crates/hir" }
-la-arena = "0.3"
-lsp-types = "0.94.1"
-mir = { path = "crates/mir" }
-move-checker = { path = "crates/move-checker" }
-riddle-lsp = { path = "app/riddle-lsp", features = ["test"] }
-rowan = "0.16.1"
-scope-graph = { path = "crates/scope-graph" }
-syntax = { path = "crates/syntax" }
-tower-lsp = "0.20.0"
-type-checker = { path = "crates/type-checker" }
-
-[[test]]
-# Cross-crate compiler integration suites owned by the root package.
-name = "mir"
-path = "tests/mir/main.rs"
-
-[[test]]
-name = "move_checker"
-path = "tests/move_checker/main.rs"
-
-[[test]]
-name = "escape_analysis"
-path = "tests/escape_analysis/main.rs"
-
-[[test]]
-name = "frontend"
-path = "tests/frontend/main.rs"
-
-[[test]]
-name = "ast_hir"
-path = "tests/ast_hir/main.rs"
-
-[[test]]
-name = "fmt"
-path = "tests/fmt/main.rs"
-
-[[test]]
-name = "riddle_lsp"
-path = "tests/riddle_lsp/unit.rs"
-
-[[test]]
-name = "scope_graph"
-path = "tests/scope_graph/main.rs"
-
-[[test]]
-name = "type_checker"
-path = "tests/type_checker/main.rs"
+[workspace.dependencies]
+anyhow = "1"
+annotate-snippets = "0.12.16"
+clap = { version = "4", features = ["derive"] }
+rowan = "0.17.0"
+riddle-syntax = { path = "crates/syntax" }
+riddlec = { path = "crates/riddlec" }
+riddle-ast = { path = "crates/ast" }

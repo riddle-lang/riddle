@@ -1,5 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: Contribution policy
-    url: https://github.com/riddle-lang/riddle/blob/main/CONTRIBUTING.md
-    about: Check which changes require prior design agreement.

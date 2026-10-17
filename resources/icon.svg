@@ -1,17 +1,14 @@
 <svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" fill="none">
- <defs>
-  <linearGradient y2="1.05556" x2="1.05556" y1="-0.05556" x1="-0.05556" id="riddleGradient">
-   <stop stop-color="#005670"/>
-   <stop stop-color="#00A1D6" offset="1"/>
-  </linearGradient>
- </defs>
- <!-- 徽章底：品牌渐变实心圆（logo 中为 0.2 透明度，图标需在明暗主题下可辨识） -->
- <!-- 谜题元素：短横线，几何与 logo.svg 完全一致 -->
- <!-- "R" 字母主体，几何与 logo.svg 完全一致 -->
- <g>
-  <title>Layer 1</title>
-  <circle id="svg_1" fill="url(#riddleGradient)" r="90" cy="100" cx="100"/>
-  <path transform="rotate(152 135 128)" id="svg_3" stroke-linecap="round" stroke-width="16" stroke="#FFFFFF" d="m140,118l-10,0m10,20l-10,0"/>
-  <path id="svg_2" stroke-linejoin="round" stroke-linecap="round" stroke-width="16" stroke="#FFFFFF" d="m70,50l0,100m0,-100c0,0 60,0 60,30c0,30 -60,30 -60,30m40,0l20,40"/>
- </g>
+    <defs>
+        <linearGradient y2="1.05556" x2="1.05556" y1="-0.05556" x1="-0.05556" id="riddleGradient">
+            <stop stop-color="#005670"/>
+            <stop stop-color="#00A1D6" offset="1"/>
+        </linearGradient>
+    </defs>
+    <g>
+        <title>Layer 1</title>
+        <circle id="svg_1" fill="url(#riddleGradient)" r="90" cy="100" cx="100"/>
+        <path transform="rotate(152 135 128)" id="svg_3" stroke-linecap="round" stroke-width="16" stroke="#FFFFFF" d="m140,118l-10,0m10,20l-10,0"/>
+        <path id="svg_2" stroke-linejoin="round" stroke-linecap="round" stroke-width="16" stroke="#FFFFFF" d="m70,50l0,100m0,-100c0,0 60,0 60,30c0,30 -60,30 -60,30m40,0l20,40"/>
+    </g>
 </svg>

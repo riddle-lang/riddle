@@ -1,9 +1,0 @@
-[package]
-name = "escape-analysis"
-version.workspace = true
-edition.workspace = true
-publish = false
-
-[dependencies]
-hir = { path = "../hir" }
-ty = { path = "../ty" }

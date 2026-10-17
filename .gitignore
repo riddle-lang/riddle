@@ -1,57 +1,8 @@
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-._*
-.Spotlight-V100
-.Trashes
-.tmp/
+# IDE
+/.idea
 
 # Rust
 /target
-**/.clue/
 
-# Generated when clue checks the bundled std package
-/std/Clue.lock
-
-# C
-*.c
-!crates/gc/src/runtime.c
-!crates/gc/src/no_gc_runtime.c
-!crates/gc/src/args_runtime.c
-
-# Editors
-.vscode/
-.idea/
-.zed/
-.helix/
-*.iml
-/editors/vscode/node_modules/
-/editors/vscode/dist/
-/editors/vscode/*.vsix
-/editors/dist/
-/editors/intellij/.gradle/
-/editors/intellij/.intellijPlatform/
-/editors/intellij/build/
-/editors/intellij/.kotlin
-/editors/zed/target/
-
-# Logs
-*.log
-
-# Environment
-.env
-
-# Binaries
-*/*.exe
-*.exe
-
-# AI
-/.junie
-/.claude
-/.agents
-/.codex
-/.omo
-/.reasonix
-/.zcode
-
+# Temp file
+/.tmp

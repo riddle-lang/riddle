@@ -1,0 +1,11 @@
+[package]
+name = "riddlec"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+annotate-snippets.workspace = true
+clap.workspace = true
+riddle-syntax.workspace = true
+riddle-ast.workspace = true
